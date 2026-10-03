@@ -3,7 +3,9 @@ const express = require("express");
 const app = express();
 app.use(express.json());
 
-const orders = [];
+const fs = require("fs");
+const ORDERS_FILE = "./orders.json";
+const orders = fs.existsSync(ORDERS_FILE) ? JSON.parse(fs.readFileSync(ORDERS_FILE, "utf8")) : [];
 let nextOrderId = 1001;
 
 app.get("/", (req, res) => {
@@ -78,6 +80,7 @@ app.post("/api/orders", (req, res) => {
   };
 
   orders.push(order);
+  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
 
   res.status(201).json({
     success: true,
