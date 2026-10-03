@@ -97,6 +97,40 @@ app.get("/api/orders", (req, res) => {
   });
 });
 
+app.delete("/api/orders/:id", (req, res) => {
+  const auth = req.headers.authorization || "";
+  const expected = "Basic " + Buffer.from(
+    (process.env.ADMIN_USER || "admin") + ":" + (process.env.ADMIN_PASSWORD || "change-me")
+  ).toString("base64");
+
+  if (auth !== expected) {
+    res.set("WWW-Authenticate", "Basic realm=\"Arif App Admin\"");
+    return res.status(401).json({
+      success: false,
+      message: "دسترسی غیرمجاز"
+    });
+  }
+
+  const id = Number(req.params.id);
+  const index = orders.findIndex(order => Number(order.id) === id);
+
+  if (index === -1) {
+    return res.status(404).json({
+      success: false,
+      message: "سفارش پیدا نشد"
+    });
+  }
+
+  const deleted = orders.splice(index, 1)[0];
+  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
+
+  res.json({
+    success: true,
+    message: "سفارش حذف شد",
+    order: deleted
+  });
+});
+
 app.get("/admin", (req, res) => {
   const auth = req.headers.authorization || "";
   const expected = "Basic " + Buffer.from(
