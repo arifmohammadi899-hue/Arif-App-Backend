@@ -97,6 +97,50 @@ app.get("/api/orders", (req, res) => {
   });
 });
 
+app.patch("/api/orders/:id/status", (req, res) => {
+  const auth = req.headers.authorization || "";
+  const expected = "Basic " + Buffer.from(
+    (process.env.ADMIN_USER || "admin") + ":" + (process.env.ADMIN_PASSWORD || "change-me")
+  ).toString("base64");
+
+  if (auth !== expected) {
+    return res.status(401).json({
+      success: false,
+      message: "دسترسی غیرمجاز"
+    });
+  }
+
+  const id = Number(req.params.id);
+  const status = String(req.body.status || "").trim();
+
+  const allowed = ["pending", "completed", "cancelled"];
+
+  if (!allowed.includes(status)) {
+    return res.status(400).json({
+      success: false,
+      message: "وضعیت نامعتبر است"
+    });
+  }
+
+  const order = orders.find(order => Number(order.id) === id);
+
+  if (!order) {
+    return res.status(404).json({
+      success: false,
+      message: "سفارش پیدا نشد"
+    });
+  }
+
+  order.status = status;
+  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
+
+  res.json({
+    success: true,
+    message: "وضعیت سفارش تغییر کرد",
+    order
+  });
+});
+
 app.delete("/api/orders/:id", (req, res) => {
   const auth = req.headers.authorization || "";
   const expected = "Basic " + Buffer.from(
