@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 
 const app = express();
@@ -137,6 +138,10 @@ app.get("/api/afgtopup/data-bundles", async (req, res) => {
       return res.status(response.status).json(data);
     }
 
+    const settings = JSON.parse(fs.readFileSync("./afgtopup-settings.json", "utf8"));
+    const eurRate = Number(settings.eur_to_toman) || 0;
+    const margin = Number(settings.margin_percent) || 0;
+    if (Array.isArray(data.bundles)) data.bundles = data.bundles.map(x => ({...x, cost_toman: Math.round(Number(x.eur_cost || 0) * eurRate), retail_price_toman: Math.round(Number(x.eur_cost || 0) * eurRate * (1 + margin / 100))}));
     res.json(data);
   } catch (error) {
     console.error("AFGTopup data bundles error:", error);

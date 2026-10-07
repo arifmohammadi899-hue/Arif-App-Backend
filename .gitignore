@@ -1,0 +1,11 @@
+.env
+.env*
+.afgkey
+*.key
+*.backup
+*.log
+backend.log
+server.log
+node_modules/
+orders.json
+prices.backup.json
