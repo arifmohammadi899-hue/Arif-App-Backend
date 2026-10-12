@@ -351,6 +351,7 @@ ${rows}
 });
 
 require("./otp")(app);
+require("./sms-otp")(app);
 
 const PORT = process.env.PORT || 10000;
 
