@@ -60,15 +60,12 @@ module.exports = function (app) {
         })
       });
 
-      const result = await response.json();
-
-      if (!response.ok || result.error ||
-          !Array.isArray(result.messages) ||
-          !result.messages.length) {
-        return res.status(502).json({
-          success: false,
-          message: "ارسال پیامک تأیید نشد"
-        });
+      const raw = await response.text();
+      let result;
+      try { result = JSON.parse(raw); } catch { result = { responseText: raw.slice(0, 500) }; }
+      if (!response.ok || result.error || !Array.isArray(result.messages) || !result.messages.length) {
+        console.error("SMSPM_ERROR", JSON.stringify({ status: response.status, error: String(result.error || result.message || result.responseText || "Unrecognized SMSPM response").slice(0, 200) }));
+        return res.status(502).json({ success: false, message: "ارسال پیامک تأیید نشد" });
       }
 
       codes.set(number, {
