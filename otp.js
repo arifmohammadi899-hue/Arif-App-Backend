@@ -1,5 +1,4 @@
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
 
 module.exports = function (app) {
   const codes = new Map();
@@ -41,21 +40,25 @@ module.exports = function (app) {
       });
 
       const code = String(crypto.randomInt(100000, 1000000));
-      const transporter = nodemailer.createTransport({
-        service: "gmail",
-        auth: {
-          user: process.env.EMAIL_USER,
-          pass: process.env.EMAIL_APP_PASSWORD
+      const response = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            "Authorization": "Bearer " + process.env.RESEND_API_KEY,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            from: "ARIF APP <onboarding@resend.dev>",
+            to: [email],
+            subject: "کد تأیید ARIF APP",
+            text: `کد تأیید شما: ${code}\nاین کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.`,
+            html: `<div dir="rtl" style="font-family:Arial,sans-serif"><h2>کد تأیید ARIF APP</h2><p>کد شما:</p><h1 style="letter-spacing:6px">${code}</h1><p>این کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.</p></div>`
+          })
+        });
+        if (!response.ok) {
+          const detail = await response.text();
+          console.error("RESEND_EMAIL_ERROR:", response.status, detail.slice(0, 300));
+          throw new Error("Resend API request failed: " + response.status);
         }
-      });
-
-      await transporter.sendMail({
-        from: `"ARIF APP" <${process.env.EMAIL_USER}>`,
-        to: email,
-        subject: "کد تأیید ARIF APP",
-        text: `کد تأیید شما: ${code}\nاین کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.`,
-        html: `<div dir="rtl" style="font-family:Arial,sans-serif"><h2>کد تأیید ARIF APP</h2><p>کد شما:</p><h1 style="letter-spacing:6px">${code}</h1><p>این کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.</p></div>`
-      });
 
       codes.set(email, {
         hash: crypto.createHash("sha256").update(code).digest("hex"),
