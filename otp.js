@@ -74,7 +74,7 @@ module.exports = function (app) {
     }
   });
 
-  app.post("/api/auth/verify-email-otp", (req, res) => {
+  app.post("/api/auth/verify-email-otp", async (req, res) => {
     const email = String(req.body.email || "").trim().toLowerCase();
     const phone = String(req.body.phone || "").replace(/[\s()-]/g, "").replace(/^\+/, "");
     const code = String(req.body.code || "");
@@ -96,6 +96,30 @@ module.exports = function (app) {
       return res.status(400).json({ success: false, message: "کد تأیید اشتباه است" });
     }
 
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      return res.status(503).json({ success: false, message: "تنظیمات ثبت کاربران آماده نیست" });
+    }
+    try {
+      const saved = await fetch(supabaseUrl.replace(/\/$/, "") + "/rest/v1/app_users?on_conflict=email", {
+        method: "POST",
+        headers: {
+          "apikey": supabaseKey,
+          "Authorization": "Bearer " + supabaseKey,
+          "Content-Type": "application/json",
+          "Prefer": "resolution=ignore-duplicates,return=minimal"
+        },
+        body: JSON.stringify({ email })
+      });
+      if (!saved.ok) {
+        console.error("SUPABASE_USER_SAVE_ERROR:", saved.status);
+        return res.status(503).json({ success: false, message: "ثبت حساب انجام نشد؛ دوباره تلاش کنید" });
+      }
+    } catch (err) {
+      console.error("SUPABASE_USER_SAVE_ERROR:", String(err.message || err).slice(0, 150));
+      return res.status(503).json({ success: false, message: "اتصال ثبت کاربران برقرار نشد؛ دوباره تلاش کنید" });
+    }
     codes.delete(email);
     return res.json({ success: true, verified: true, message: "ایمیل تأیید شد" });
   });
