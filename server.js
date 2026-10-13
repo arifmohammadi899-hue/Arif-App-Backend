@@ -362,7 +362,7 @@ ${rows}
 });
 
 require("./otp")(app);
-require("./sms-otp")(app);
+// SMS OTP disabled
 
 const PORT = process.env.PORT || 10000;
 
