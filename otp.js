@@ -17,8 +17,8 @@ module.exports = function (app) {
       if (!/^\d{8,15}$/.test(number)) {
         return res.status(400).json({ success: false, message: "شماره تلفن بین‌المللی معتبر وارد کنید" });
       }
-      if (!process.env.EMAIL_USER || !process.env.EMAIL_APP_PASSWORD) {
-        return res.status(503).json({ success: false, message: "سرویس ایمیل هنوز تنظیم نشده است" });
+      if (!process.env.RESEND_API_KEY) {
+        return res.status(503).json({ success: false, message: "کلید سرویس ایمیل تنظیم نشده است" });
       }
 
       const now = Date.now();
