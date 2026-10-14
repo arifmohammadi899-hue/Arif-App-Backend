@@ -1,5 +1,34 @@
 const crypto = require("crypto");
 
+
+/* SESSION_TOKEN_HELPERS */
+function createSession(email, secret) {
+  const payload = Buffer.from(JSON.stringify({
+    email,
+    exp: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60
+  })).toString('base64url');
+  const signature = crypto.createHmac('sha256', secret)
+    .update(payload).digest('base64url');
+  return payload + '.' + signature;
+}
+function readSession(token, secret) {
+  try {
+    const parts = String(token || '').split('.');
+    if (parts.length !== 2) return null;
+    const expected = crypto.createHmac('sha256', secret)
+      .update(parts[0]).digest();
+    const actual = Buffer.from(parts[1], 'base64url');
+    if (actual.length !== expected.length ||
+        !crypto.timingSafeEqual(actual, expected)) return null;
+    const data = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+    if (!data.email || !Number.isFinite(data.exp) ||
+        data.exp <= Math.floor(Date.now() / 1000)) return null;
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
 module.exports = function (app) {
   const codes = new Map();
   const requests = new Map();
@@ -96,6 +125,10 @@ module.exports = function (app) {
       return res.status(400).json({ success: false, message: "کد تأیید اشتباه است" });
     }
 
+    const sessionSecret = process.env.ARIF_SESSION_SECRET;
+    if (!sessionSecret || Buffer.byteLength(sessionSecret) < 32) {
+      return res.status(503).json({ success: false, message: "تنظیمات نشست امن آماده نیست" });
+    }
     const supabaseUrl = process.env.SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
     if (!supabaseUrl || !supabaseKey) {
@@ -121,6 +154,57 @@ module.exports = function (app) {
       return res.status(503).json({ success: false, message: "اتصال ثبت کاربران برقرار نشد؛ دوباره تلاش کنید" });
     }
     codes.delete(email);
-    return res.json({ success: true, verified: true, message: "ایمیل تأیید شد" });
+    const sessionToken = createSession(email, sessionSecret);
+    return res.json({
+      success: true,
+      verified: true,
+      sessionToken,
+      message: "ایمیل تأیید شد"
+    });
   });
+
+  app.get("/api/account/balance", async (req, res) => {
+    const secret = process.env.ARIF_SESSION_SECRET;
+    const auth = String(req.headers.authorization || "");
+    const match = auth.match(/^Bearer (.+)$/i);
+    if (!secret || !match) {
+      return res.status(401).json({ success: false, message: "ورود معتبر لازم است" });
+    }
+    const session = readSession(match[1], secret);
+    if (!session) {
+      return res.status(401).json({ success: false, message: "نشست نامعتبر یا منقضی شده است" });
+    }
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      return res.status(503).json({ success: false, message: "تنظیمات پایگاه داده آماده نیست" });
+    }
+    try {
+      const query = new URLSearchParams({
+        select: "balance",
+        email: "eq." + session.email,
+        limit: "1"
+      });
+      const response = await fetch(url.replace(/\/$/, "") +
+        "/rest/v1/app_users?" + query.toString(), {
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key
+          }
+        });
+      if (!response.ok) {
+        console.error("SUPABASE_BALANCE_ERROR:", response.status);
+        return res.status(503).json({ success: false, message: "خواندن موجودی ناموفق بود" });
+      }
+      const rows = await response.json();
+      if (!Array.isArray(rows) || !rows.length) {
+        return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+      }
+      return res.json({ success: true, balance: Number(rows[0].balance) || 0 });
+    } catch (err) {
+      console.error("SUPABASE_BALANCE_ERROR:", String(err.message || err).slice(0, 150));
+      return res.status(503).json({ success: false, message: "اتصال پایگاه داده برقرار نشد" });
+    }
+  });
+
 };
