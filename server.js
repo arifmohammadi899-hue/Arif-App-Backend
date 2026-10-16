@@ -489,6 +489,42 @@ app.get("/admin", async (req, res) => {
     </tr>
   `).join("");
 
+
+  let walletDeposits = [];
+  let walletLoadError = "";
+  try {
+    const u = process.env.SUPABASE_URL;
+    const k = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!u || !k) {
+      walletLoadError = "تنظیمات پایگاه داده کامل نیست";
+    } else {
+      const r = await fetch(u.replace(/\/$/, "") +
+        "/rest/v1/wallet_deposits?select=id,user_id,amount,payment_reference,status,created_at,reviewed_at&order=created_at.desc&limit=200",
+        { headers: { apikey: k, Authorization: "Bearer " + k } });
+      if (!r.ok) walletLoadError = "خواندن درخواست‌های شارژ ناموفق بود";
+      else walletDeposits = await r.json();
+    }
+  } catch (_) {
+    walletLoadError = "اتصال به پایگاه داده برقرار نشد";
+  }
+  const walletRows = walletDeposits.map(d => `
+    <tr>
+      <td>${escapeHtml(d.id)}</td>
+      <td>${escapeHtml(d.user_id)}</td>
+      <td>${escapeHtml(Number(d.amount || 0).toLocaleString("fa-IR"))} تومان</td>
+      <td>${escapeHtml(d.payment_reference || "ثبت نشده")}</td>
+      <td class="wallet-status">${escapeHtml(d.status)}</td>
+      <td>${escapeHtml(d.created_at || "")}</td>
+      <td>
+        ${d.status === "pending" ? `
+          <button class="wallet-review" data-id="${escapeHtml(d.id)}" data-status="approved">تأیید شارژ</button>
+          <button class="wallet-review" data-id="${escapeHtml(d.id)}" data-status="rejected">رد شارژ</button>
+        ` : "بررسی شده"}
+        <small class="wallet-result" aria-live="polite"></small>
+      </td>
+    </tr>
+  `).join("");
+
   res.send(`<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -515,6 +551,15 @@ ${usersLoadError ? `<p>${escapeHtml(usersLoadError)}</p>` : ""}
 <tr><th>ایمیل کاربر</th><th>موجودی حساب</th><th>تاریخ ثبت‌نام</th><th>مدیریت موجودی</th></tr>
 ${userRows}
 </table>
+
+<h2>درخواست‌های شارژ کیف پول</h2>
+<p>تعداد درخواست‌ها: ${walletDeposits.length}</p>
+${walletLoadError ? `<p>${escapeHtml(walletLoadError)}</p>` : ""}
+<table>
+<tr><th>شماره درخواست</th><th>شناسه کاربر</th><th>مبلغ</th><th>شماره پیگیری پرداخت</th><th>وضعیت</th><th>تاریخ</th><th>عملیات</th></tr>
+${walletRows}
+</table>
+
 <h2>سفارش‌ها</h2>
 <p>تعداد سفارش‌ها: ${orders.length}</p>
 <table>
@@ -522,6 +567,41 @@ ${userRows}
 ${rows}
 </table>
 <script>
+
+document.querySelectorAll(".wallet-review").forEach(button => {
+  button.addEventListener("click", async () => {
+    const row = button.closest("tr");
+    const result = row.querySelector(".wallet-result");
+    const statusCell = row.querySelector(".wallet-status");
+    const buttons = row.querySelectorAll(".wallet-review");
+    if (button.dataset.status === "approved" &&
+        !confirm("آیا از تأیید این شارژ و افزایش موجودی مطمئن هستید؟")) return;
+    if (button.dataset.status === "rejected" &&
+        !confirm("آیا درخواست شارژ رد شود؟")) return;
+    buttons.forEach(b => b.disabled = true);
+    result.textContent = "در حال بررسی...";
+    try {
+      const response = await fetch("/api/admin/wallet-deposits/" +
+        encodeURIComponent(button.dataset.id), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify({ status: button.dataset.status })
+        });
+      const body = await response.json();
+      if (!response.ok || !body.success)
+        throw new Error(body.message || "بررسی درخواست ناموفق بود");
+      statusCell.textContent = button.dataset.status;
+      result.textContent = button.dataset.status === "approved"
+        ? "تأیید شد و موجودی افزایش یافت" : "درخواست رد شد";
+      buttons.forEach(b => b.remove());
+    } catch (error) {
+      result.textContent = error.message || "ارتباط برقرار نشد";
+      buttons.forEach(b => b.disabled = false);
+    }
+  });
+});
+
 document.querySelectorAll(".balance-form").forEach(form => {
   form.addEventListener("submit", async event => {
     event.preventDefault();
