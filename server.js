@@ -37,6 +37,28 @@ app.get("/api/prices", (req, res) => {
 });
 
 app.post("/api/prices", (req, res) => {
+  const auth = req.headers.authorization || "";
+  const adminUser = process.env.ADMIN_USER;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminUser || !adminPassword || adminPassword === "change-me") {
+    return res.status(503).json({
+      success: false,
+      message: "تنظیمات مدیر آماده نیست"
+    });
+  }
+
+  const expected = "Basic " + Buffer.from(
+    adminUser + ":" + adminPassword
+  ).toString("base64");
+
+  if (auth !== expected) {
+    return res.status(401).json({
+      success: false,
+      message: "دسترسی غیرمجاز"
+    });
+  }
+
   const prices = req.body;
 
   if (!prices || typeof prices !== "object" || Array.isArray(prices)) {
@@ -237,8 +259,13 @@ app.post("/api/afgtopup/data-bundle-topup", async (req, res) => {
 });
 app.patch("/api/orders/:id/status", (req, res) => {
   const auth = req.headers.authorization || "";
+  const adminUser = process.env.ADMIN_USER;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminUser || !adminPassword || adminPassword === "change-me") {
+    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
+  }
   const expected = "Basic " + Buffer.from(
-    (process.env.ADMIN_USER || "admin") + ":" + (process.env.ADMIN_PASSWORD || "change-me")
+    adminUser + ":" + adminPassword
   ).toString("base64");
 
   if (auth !== expected) {
@@ -281,8 +308,13 @@ app.patch("/api/orders/:id/status", (req, res) => {
 
 app.delete("/api/orders/:id", (req, res) => {
   const auth = req.headers.authorization || "";
+  const adminUser = process.env.ADMIN_USER;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminUser || !adminPassword || adminPassword === "change-me") {
+    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
+  }
   const expected = "Basic " + Buffer.from(
-    (process.env.ADMIN_USER || "admin") + ":" + (process.env.ADMIN_PASSWORD || "change-me")
+    adminUser + ":" + adminPassword
   ).toString("base64");
 
   if (auth !== expected) {
@@ -313,10 +345,15 @@ app.delete("/api/orders/:id", (req, res) => {
   });
 });
 
-app.get("/admin", (req, res) => {
+app.get("/admin", async (req, res) => {
   const auth = req.headers.authorization || "";
+  const adminUser = process.env.ADMIN_USER;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminUser || !adminPassword || adminPassword === "change-me") {
+    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
+  }
   const expected = "Basic " + Buffer.from(
-    (process.env.ADMIN_USER || "admin") + ":" + (process.env.ADMIN_PASSWORD || "change-me")
+    adminUser + ":" + adminPassword
   ).toString("base64");
 
   if (auth !== expected) {
@@ -324,15 +361,54 @@ app.get("/admin", (req, res) => {
     return res.status(401).send("دسترسی غیرمجاز");
   }
 
+  const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+
+  let appUsers = [];
+  let usersLoadError = "";
+  try {
+    const supabaseUrl = process.env.SUPABASE_URL;
+    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!supabaseUrl || !supabaseKey) {
+      usersLoadError = "تنظیمات پایگاه داده کامل نیست";
+    } else {
+      const response = await fetch(
+        supabaseUrl.replace(/\/$/, "") +
+          "/rest/v1/app_users?select=email,balance,created_at&order=created_at.desc&limit=500",
+        { headers: { apikey: supabaseKey, Authorization: "Bearer " + supabaseKey } }
+      );
+      if (!response.ok) {
+        usersLoadError = "خواندن فهرست کاربران ناموفق بود";
+      } else {
+        appUsers = await response.json();
+      }
+    }
+  } catch (_) {
+    usersLoadError = "اتصال به پایگاه داده برقرار نشد";
+  }
+
+  const userRows = appUsers.map(user => `
+    <tr>
+      <td>${escapeHtml(user.email)}</td>
+      <td>${escapeHtml(Number(user.balance || 0).toLocaleString("fa-IR"))} تومان</td>
+      <td>${escapeHtml(user.created_at || "")}</td>
+    </tr>
+  `).join("");
+
   const rows = orders.map(order => `
     <tr>
-      <td>${order.id}</td>
-      <td>${order.product}</td>
-      <td>${order.price}</td>
-      <td>${order.playerId}</td>
-      <td>${order.tracking}</td>
-      <td>${order.status}</td>
-      <td>${order.createdAt}</td>
+      <td>${escapeHtml(order.id)}</td>
+      <td>${escapeHtml(order.product)}</td>
+      <td>${escapeHtml(order.price)}</td>
+      <td>${escapeHtml(order.playerId)}</td>
+      <td>${escapeHtml(order.tracking)}</td>
+      <td>${escapeHtml(order.status)}</td>
+      <td>${escapeHtml(order.createdAt)}</td>
     </tr>
   `).join("");
 
@@ -352,6 +428,14 @@ th{background:#222;color:white}
 </head>
 <body>
 <h1>پنل مدیریت Arif App</h1>
+<h2>کاربران و موجودی حساب</h2>
+<p>تعداد کاربران ثبت‌شده: ${appUsers.length}</p>
+${usersLoadError ? `<p>${escapeHtml(usersLoadError)}</p>` : ""}
+<table>
+<tr><th>ایمیل کاربر</th><th>موجودی حساب</th><th>تاریخ ثبت‌نام</th></tr>
+${userRows}
+</table>
+<h2>سفارش‌ها</h2>
 <p>تعداد سفارش‌ها: ${orders.length}</p>
 <table>
 <tr><th>شماره</th><th>محصول</th><th>قیمت</th><th>Player ID</th><th>پیگیری</th><th>وضعیت</th><th>تاریخ</th></tr>

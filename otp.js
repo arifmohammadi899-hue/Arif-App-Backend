@@ -207,4 +207,181 @@ module.exports = function (app) {
     }
   });
 
+
+
+  /* WALLET_DEPOSIT_ROUTES */
+  function walletSession(req) {
+    const secret = process.env.ARIF_SESSION_SECRET;
+    const match = String(req.headers.authorization || "").match(/^Bearer (.+)$/i);
+    return secret && match ? readSession(match[1], secret) : null;
+  }
+
+  function walletAdmin(req) {
+    const user = process.env.ADMIN_USER;
+    const pass = process.env.ADMIN_PASSWORD;
+    if (!user || !pass || pass === "change-me") return false;
+    const auth = String(req.headers.authorization || "");
+    const match = auth.match(/^Basic (.+)$/i);
+    if (!match) return false;
+    let supplied;
+    try {
+      supplied = Buffer.from(match[1], "base64").toString("utf8");
+    } catch (_) {
+      return false;
+    }
+    const expected = user + ":" + pass;
+    const a = Buffer.from(supplied);
+    const b = Buffer.from(expected);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  }
+
+  async function walletUser(email) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) throw new Error("database_not_configured");
+    const q = new URLSearchParams({ select: "id,email", email: "eq." + email, limit: "1" });
+    const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/app_users?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!r.ok) throw new Error("database_read_failed");
+    const rows = await r.json();
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+  }
+
+  app.post("/api/wallet/deposits", async (req, res) => {
+    const session = walletSession(req);
+    if (!session) return res.status(401).json({ success: false, message: "ورود معتبر لازم است" });
+    const amount = Number(req.body.amount);
+    const reference = String(req.body.payment_reference || "").trim().slice(0, 120);
+    if (!Number.isSafeInteger(amount) || amount < 10000 || amount > 100000000) {
+      return res.status(400).json({ success: false, message: "مبلغ باید بین ۱۰٬۰۰۰ تا ۱۰۰٬۰۰۰٬۰۰۰ تومان باشد" });
+    }
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return res.status(503).json({ success: false, message: "پایگاه داده آماده نیست" });
+    try {
+      const user = await walletUser(session.email);
+      if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+      const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/wallet_deposits", {
+        method: "POST",
+        headers: {
+          apikey: key, Authorization: "Bearer " + key,
+          "Content-Type": "application/json",
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify({
+          user_id: user.id, amount,
+          payment_reference: reference || null
+        })
+      });
+      if (!r.ok) {
+        console.error("WALLET_DEPOSIT_CREATE_ERROR:", r.status);
+        return res.status(503).json({ success: false, message: "ثبت درخواست شارژ ناموفق بود" });
+      }
+      const rows = await r.json();
+      return res.status(201).json({ success: true, deposit: rows[0] });
+    } catch (e) {
+      console.error("WALLET_DEPOSIT_CREATE_ERROR:", String(e.message || e).slice(0, 120));
+      return res.status(503).json({ success: false, message: "خطا در ثبت درخواست شارژ" });
+    }
+  });
+
+  app.get("/api/wallet/deposits", async (req, res) => {
+    const session = walletSession(req);
+    if (!session) return res.status(401).json({ success: false, message: "ورود معتبر لازم است" });
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return res.status(503).json({ success: false, message: "پایگاه داده آماده نیست" });
+    try {
+      const user = await walletUser(session.email);
+      if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+      const q = new URLSearchParams({
+        select: "id,amount,payment_reference,status,created_at,reviewed_at",
+        user_id: "eq." + user.id, order: "created_at.desc", limit: "50"
+      });
+      const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/wallet_deposits?" + q, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      });
+      if (!r.ok) return res.status(503).json({ success: false, message: "خواندن درخواست‌ها ناموفق بود" });
+      return res.json({ success: true, deposits: await r.json() });
+    } catch (e) {
+      console.error("WALLET_DEPOSIT_LIST_ERROR:", String(e.message || e).slice(0, 120));
+      return res.status(503).json({ success: false, message: "خطا در خواندن درخواست‌ها" });
+    }
+  });
+
+  app.get("/api/admin/wallet-deposits", async (req, res) => {
+    if (!walletAdmin(req)) return res.status(401).json({ success: false, message: "دسترسی مدیر لازم است" });
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return res.status(503).json({ success: false, message: "پایگاه داده آماده نیست" });
+    try {
+      const q = new URLSearchParams({
+        select: "id,user_id,amount,payment_reference,status,created_at,reviewed_at",
+        order: "created_at.desc", limit: "200"
+      });
+      const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/wallet_deposits?" + q, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      });
+      if (!r.ok) return res.status(503).json({ success: false, message: "خواندن درخواست‌ها ناموفق بود" });
+      return res.json({ success: true, deposits: await r.json() });
+    } catch (e) {
+      console.error("WALLET_ADMIN_LIST_ERROR:", String(e.message || e).slice(0, 120));
+      return res.status(503).json({ success: false, message: "خطا در خواندن درخواست‌ها" });
+    }
+  });
+
+  app.patch("/api/admin/wallet-deposits/:id", async (req, res) => {
+    if (!walletAdmin(req)) return res.status(401).json({ success: false, message: "دسترسی مدیر لازم است" });
+    const id = Number(req.params.id);
+    const status = String(req.body.status || "");
+    if (!Number.isSafeInteger(id) || id < 1 || !["approved", "rejected"].includes(status)) {
+      return res.status(400).json({ success: false, message: "شناسه یا وضعیت نامعتبر است" });
+    }
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) return res.status(503).json({ success: false, message: "پایگاه داده آماده نیست" });
+    try {
+      if (status === "approved") {
+        const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/rpc/approve_wallet_deposit", {
+          method: "POST",
+          headers: {
+            apikey: key, Authorization: "Bearer " + key,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ p_deposit_id: id })
+        });
+        if (!r.ok) {
+          const detail = await r.text();
+          if (detail.includes("deposit_not_pending")) {
+            return res.status(409).json({ success: false, message: "این درخواست قبلاً بررسی شده است" });
+          }
+          if (detail.includes("deposit_not_found")) {
+            return res.status(404).json({ success: false, message: "درخواست پیدا نشد" });
+          }
+          console.error("WALLET_APPROVE_ERROR:", r.status, detail.slice(0, 160));
+          return res.status(503).json({ success: false, message: "تأیید شارژ انجام نشد" });
+        }
+        return res.json({ success: true, result: await r.json() });
+      }
+      const q = new URLSearchParams({ id: "eq." + id, status: "eq.pending" });
+      const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/wallet_deposits?" + q, {
+        method: "PATCH",
+        headers: {
+          apikey: key, Authorization: "Bearer " + key,
+          "Content-Type": "application/json",
+          Prefer: "return=representation"
+        },
+        body: JSON.stringify({ status: "rejected", reviewed_at: new Date().toISOString() })
+      });
+      if (!r.ok) return res.status(503).json({ success: false, message: "رد درخواست ناموفق بود" });
+      const rows = await r.json();
+      if (!rows.length) return res.status(409).json({ success: false, message: "درخواست پیدا نشد یا قبلاً بررسی شده است" });
+      return res.json({ success: true, deposit: rows[0] });
+    } catch (e) {
+      console.error("WALLET_REVIEW_ERROR:", String(e.message || e).slice(0, 120));
+      return res.status(503).json({ success: false, message: "خطا در بررسی درخواست شارژ" });
+    }
+  });
+
 };
