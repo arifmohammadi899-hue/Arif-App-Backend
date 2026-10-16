@@ -345,6 +345,72 @@ app.delete("/api/orders/:id", (req, res) => {
   });
 });
 
+
+app.post("/admin/users/balance", async (req, res) => {
+  const auth = req.headers.authorization || "";
+  const adminUser = process.env.ADMIN_USER;
+  const adminPassword = process.env.ADMIN_PASSWORD;
+
+  if (!adminUser || !adminPassword || adminPassword === "change-me") {
+    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
+  }
+
+  const expected = "Basic " + Buffer.from(adminUser + ":" + adminPassword).toString("base64");
+  if (auth !== expected) {
+    res.set("WWW-Authenticate", 'Basic realm="Arif App Admin"');
+    return res.status(401).json({ success: false, message: "دسترسی غیرمجاز" });
+  }
+
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const amount = Number(req.body?.amount);
+  const operation = String(req.body?.operation || "");
+
+  if (!email || !Number.isSafeInteger(amount) || amount < 1 || amount > 100000000 ||
+      !["add", "subtract"].includes(operation)) {
+    return res.status(400).json({ success: false, message: "ایمیل، مبلغ یا عملیات نامعتبر است" });
+  }
+
+  try {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      return res.status(503).json({ success: false, message: "تنظیمات پایگاه داده کامل نیست" });
+    }
+
+    const response = await fetch(
+      url.replace(/\/$/, "") + "/rest/v1/rpc/admin_adjust_user_balance",
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          p_email: email,
+          p_amount: amount,
+          p_operation: operation
+        })
+      }
+    );
+
+    const resultText = await response.text();
+    if (!response.ok) {
+      let message = "تغییر موجودی ناموفق بود";
+      if (resultText.includes("user_not_found")) message = "کاربر پیدا نشد";
+      else if (resultText.includes("insufficient_balance")) message = "موجودی برای کاهش کافی نیست";
+      else if (resultText.includes("invalid_amount")) message = "مبلغ نامعتبر است";
+      return res.status(response.status === 404 ? 404 : 400).json({ success: false, message });
+    }
+
+    let balance;
+    try { balance = JSON.parse(resultText); } catch (_) { balance = Number(resultText); }
+    return res.json({ success: true, balance, message: "موجودی با موفقیت تغییر کرد" });
+  } catch (_) {
+    return res.status(500).json({ success: false, message: "ارتباط با پایگاه داده برقرار نشد" });
+  }
+});
+
 app.get("/admin", async (req, res) => {
   const auth = req.headers.authorization || "";
   const adminUser = process.env.ADMIN_USER;
@@ -395,8 +461,19 @@ app.get("/admin", async (req, res) => {
   const userRows = appUsers.map(user => `
     <tr>
       <td>${escapeHtml(user.email)}</td>
-      <td>${escapeHtml(Number(user.balance || 0).toLocaleString("fa-IR"))} تومان</td>
+      <td class="user-balance">${escapeHtml(Number(user.balance || 0).toLocaleString("fa-IR"))} تومان</td>
       <td>${escapeHtml(user.created_at || "")}</td>
+      <td>
+        <form class="balance-form" data-email="${escapeHtml(user.email)}">
+          <input name="amount" type="number" min="1" max="100000000" step="1" required placeholder="مبلغ به تومان" style="width:120px">
+          <select name="operation">
+            <option value="add">افزایش</option>
+            <option value="subtract">کاهش</option>
+          </select>
+          <button type="submit">ثبت</button>
+          <small class="balance-result" aria-live="polite"></small>
+        </form>
+      </td>
     </tr>
   `).join("");
 
@@ -424,6 +501,9 @@ h1{text-align:center}
 table{width:100%;border-collapse:collapse;background:white}
 th,td{border:1px solid #ddd;padding:10px;text-align:center}
 th{background:#222;color:white}
+input,select,button{padding:7px;margin:3px}
+button{cursor:pointer}
+.balance-result{display:block}
 </style>
 </head>
 <body>
@@ -432,7 +512,7 @@ th{background:#222;color:white}
 <p>تعداد کاربران ثبت‌شده: ${appUsers.length}</p>
 ${usersLoadError ? `<p>${escapeHtml(usersLoadError)}</p>` : ""}
 <table>
-<tr><th>ایمیل کاربر</th><th>موجودی حساب</th><th>تاریخ ثبت‌نام</th></tr>
+<tr><th>ایمیل کاربر</th><th>موجودی حساب</th><th>تاریخ ثبت‌نام</th><th>مدیریت موجودی</th></tr>
 ${userRows}
 </table>
 <h2>سفارش‌ها</h2>
@@ -441,6 +521,40 @@ ${userRows}
 <tr><th>شماره</th><th>محصول</th><th>قیمت</th><th>Player ID</th><th>پیگیری</th><th>وضعیت</th><th>تاریخ</th></tr>
 ${rows}
 </table>
+<script>
+document.querySelectorAll(".balance-form").forEach(form => {
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    const result = form.querySelector(".balance-result");
+    const button = form.querySelector('button[type="submit"]');
+    const data = new FormData(form);
+    button.disabled = true;
+    result.textContent = "در حال ثبت...";
+    try {
+      const response = await fetch("/admin/users/balance", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          email: form.dataset.email,
+          amount: Number(data.get("amount")),
+          operation: data.get("operation")
+        })
+      });
+      const body = await response.json();
+      if (!response.ok || !body.success) throw new Error(body.message || "خطا در ثبت");
+      form.closest("tr").querySelector(".user-balance").textContent =
+        Number(body.balance).toLocaleString("fa-IR") + " تومان";
+      result.textContent = body.message;
+      form.querySelector('[name="amount"]').value = "";
+    } catch (error) {
+      result.textContent = error.message || "ارتباط برقرار نشد";
+    } finally {
+      button.disabled = false;
+    }
+  });
+});
+</script>
 </body>
 </html>`);
 });
