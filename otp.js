@@ -210,6 +210,7 @@ module.exports = function (app) {
 
 
   /* WALLET_DEPOSIT_ROUTES */
+  const adminAuth = require("./admin-auth");
   function walletSession(req) {
     const secret = process.env.ARIF_SESSION_SECRET;
     const match = String(req.headers.authorization || "").match(/^Bearer (.+)$/i);
@@ -217,22 +218,7 @@ module.exports = function (app) {
   }
 
   function walletAdmin(req) {
-    const user = process.env.ADMIN_USER;
-    const pass = process.env.ADMIN_PASSWORD;
-    if (!user || !pass || pass === "change-me") return false;
-    const auth = String(req.headers.authorization || "");
-    const match = auth.match(/^Basic (.+)$/i);
-    if (!match) return false;
-    let supplied;
-    try {
-      supplied = Buffer.from(match[1], "base64").toString("utf8");
-    } catch (_) {
-      return false;
-    }
-    const expected = user + ":" + pass;
-    const a = Buffer.from(supplied);
-    const b = Buffer.from(expected);
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
+    return adminAuth.isAdmin(req);
   }
 
   async function walletUser(email) {

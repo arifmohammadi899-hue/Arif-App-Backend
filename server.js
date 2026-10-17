@@ -13,6 +13,7 @@ app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+const adminAuth = require("./admin-auth");
 app.use(express.json());
 
 const fs = require("fs");
@@ -346,21 +347,72 @@ app.delete("/api/orders/:id", (req, res) => {
 });
 
 
+
+app.get("/admin/login", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (adminAuth.isAdmin(req)) return res.redirect("/admin");
+  res.type("html").send(`<!doctype html>
+<html lang="fa" dir="rtl"><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ورود مدیر ARIF APP</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:380px;margin:50px auto;padding:20px}
+input,button{box-sizing:border-box;width:100%;padding:12px;margin:8px 0}
+</style>
+<h2>ورود مدیر ARIF APP</h2>
+<form id="f">
+<input name="username" autocomplete="username" placeholder="نام کاربری مدیر" required>
+<input name="password" type="password" autocomplete="current-password" placeholder="رمز مدیر" required>
+<button>ورود</button><p id="msg" role="alert"></p>
+</form>
+<script>
+f.addEventListener("submit",async e=>{
+ e.preventDefault();
+ const msg=document.getElementById("msg");
+ msg.textContent="در حال بررسی...";
+ try{
+  const r=await fetch("/admin/login",{method:"POST",credentials:"same-origin",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({username:f.username.value,password:f.password.value})});
+  const d=await r.json();
+  if(!r.ok||!d.success)throw Error(d.message||"ورود ناموفق بود");
+  location.replace("/admin");
+ }catch(err){msg.textContent=err.message||"ارتباط برقرار نشد";}
+});
+</script></html>`);
+});
+
+app.post("/admin/login", (req, res) => {
+  const expectedUser = process.env.ADMIN_USER || "";
+  const expectedPass = process.env.ADMIN_PASSWORD || "";
+  if (!expectedUser || !expectedPass || expectedPass === "change-me") {
+    return res.status(503).json({success:false,message:"تنظیمات مدیر آماده نیست"});
+  }
+  const same = (a,b) => {
+    const x = Buffer.from(String(a));
+    const y = Buffer.from(String(b));
+    return x.length === y.length && require("crypto").timingSafeEqual(x,y);
+  };
+  if (!same(req.body?.username || "", expectedUser) ||
+      !same(req.body?.password || "", expectedPass)) {
+    return res.status(401).json({success:false,message:"نام کاربری یا رمز نادرست است"});
+  }
+  try {
+    adminAuth.setSessionCookie(res, adminAuth.createSession(expectedUser));
+    return res.json({success:true});
+  } catch (e) {
+    console.error("ADMIN_SESSION_CONFIG_ERROR:", String(e.message || e).slice(0,100));
+    return res.status(503).json({success:false,message:"تنظیم نشست مدیر در سرور کامل نیست"});
+  }
+});
+
+app.post("/admin/logout", (req, res) => {
+  adminAuth.clearSessionCookie(res);
+  res.redirect(303, "/admin/login");
+});
+
 app.post("/admin/users/balance", async (req, res) => {
-  const auth = req.headers.authorization || "";
-  const adminUser = process.env.ADMIN_USER;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-
-  if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
-  }
-
-  const expected = "Basic " + Buffer.from(adminUser + ":" + adminPassword).toString("base64");
-  if (auth !== expected) {
-    res.set("WWW-Authenticate", 'Basic realm="Arif App Admin"');
-    return res.status(401).json({ success: false, message: "دسترسی غیرمجاز" });
-  }
-
+  if (!adminAuth.isAdmin(req)) return res.status(401).json({success:false,message:"نشست مدیر منقضی شده؛ دوباره وارد شوید"});
   const email = String(req.body?.email || "").trim().toLowerCase();
   const amount = Number(req.body?.amount);
   const operation = String(req.body?.operation || "");
@@ -412,21 +464,7 @@ app.post("/admin/users/balance", async (req, res) => {
 });
 
 app.get("/admin", async (req, res) => {
-  const auth = req.headers.authorization || "";
-  const adminUser = process.env.ADMIN_USER;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-  if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
-  }
-  const expected = "Basic " + Buffer.from(
-    adminUser + ":" + adminPassword
-  ).toString("base64");
-
-  if (auth !== expected) {
-    res.set("WWW-Authenticate", "Basic realm=\"Arif App Admin\"");
-    return res.status(401).send("دسترسی غیرمجاز");
-  }
-
+  if (!adminAuth.isAdmin(req)) return res.redirect(303, "/admin/login");
   const escapeHtml = value => String(value ?? "").replace(/[&<>"']/g, char => ({
     "&": "&amp;",
     "<": "&lt;",
