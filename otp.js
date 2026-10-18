@@ -248,7 +248,42 @@ module.exports = function (app) {
     try {
       const user = await walletUser(session.email);
       if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
-      const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/wallet_deposits", {
+
+      const dataUrl = String(req.body.receipt_data || "");
+      const imageMatch = dataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/);
+      if (!imageMatch) {
+        return res.status(400).json({ success: false, message: "عکس رسید با فرمت JPG، PNG یا WEBP لازم است" });
+      }
+
+      const receiptBuffer = Buffer.from(imageMatch[2].replace(/\s/g, ""), "base64");
+      if (!receiptBuffer.length || receiptBuffer.length > 2500000) {
+        return res.status(400).json({ success: false, message: "حجم عکس باید کمتر از ۲٫۵ مگابایت باشد" });
+      }
+
+      const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[imageMatch[1]];
+      const receiptPath = user.id + "/" + require("crypto").randomUUID() + "." + ext;
+      const storageObjectUrl = url.replace(/\/$/, "") + "/storage/v1/object/wallet-receipts/" +
+        receiptPath.split("/").map(encodeURIComponent).join("/");
+
+      const upload = await fetch(storageObjectUrl, {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": imageMatch[1],
+          "x-upsert": "false"
+        },
+        body: receiptBuffer
+      });
+
+      if (!upload.ok) {
+        console.error("WALLET_RECEIPT_UPLOAD_ERROR:", upload.status);
+        return res.status(503).json({ success: false, message: "آپلود رسید انجام نشد؛ تنظیمات باکت را بررسی کنید" });
+      }
+
+      let keepReceipt = false;
+      try {
+        const r = await fetch(url.replace(/\/$/, "") + "/rest/v1/wallet_deposits", {
         method: "POST",
         headers: {
           apikey: key, Authorization: "Bearer " + key,
@@ -257,15 +292,30 @@ module.exports = function (app) {
         },
         body: JSON.stringify({
           user_id: user.id, amount,
-          payment_reference: reference || null
+          payment_reference: reference || null,
+          receipt_path: receiptPath
         })
       });
       if (!r.ok) {
         console.error("WALLET_DEPOSIT_CREATE_ERROR:", r.status);
+        await fetch(storageObjectUrl, {
+          method: "DELETE",
+          headers: { apikey: key, Authorization: "Bearer " + key }
+        }).catch(() => {});
         return res.status(503).json({ success: false, message: "ثبت درخواست شارژ ناموفق بود" });
       }
+      keepReceipt = true;
       const rows = await r.json();
       return res.status(201).json({ success: true, deposit: rows[0] });
+      } finally {
+        if (!keepReceipt) {
+          // در صورت بروز خطا، رسید بارگذاری‌شده پاک می‌شود.
+          await fetch(storageObjectUrl, {
+            method: "DELETE",
+            headers: { apikey: key, Authorization: "Bearer " + key }
+          }).catch(() => {});
+        }
+      }
     } catch (e) {
       console.error("WALLET_DEPOSIT_CREATE_ERROR:", String(e.message || e).slice(0, 120));
       return res.status(503).json({ success: false, message: "خطا در ثبت درخواست شارژ" });
@@ -314,6 +364,80 @@ module.exports = function (app) {
     } catch (e) {
       console.error("WALLET_ADMIN_LIST_ERROR:", String(e.message || e).slice(0, 120));
       return res.status(503).json({ success: false, message: "خطا در خواندن درخواست‌ها" });
+    }
+  });
+
+  app.get("/api/admin/wallet-deposits/:id/receipt", async (req, res) => {
+    if (!walletAdmin(req)) {
+      return res.status(401).json({ success: false, message: "دسترسی مدیر لازم است" });
+    }
+
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) {
+      return res.status(400).json({ success: false, message: "شناسه درخواست نامعتبر است" });
+    }
+
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      return res.status(503).json({ success: false, message: "پایگاه داده آماده نیست" });
+    }
+
+    try {
+      const q = new URLSearchParams({
+        select: "id,receipt_path",
+        id: "eq." + id,
+        limit: "1"
+      });
+      const base = url.replace(/\/$/, "");
+      const r = await fetch(base + "/rest/v1/wallet_deposits?" + q, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      });
+
+      if (!r.ok) {
+        return res.status(503).json({ success: false, message: "خواندن رسید ناموفق بود" });
+      }
+
+      const rows = await r.json();
+      const path = rows[0] && rows[0].receipt_path;
+      if (!path || !/^\d+\/[a-f0-9-]+\.(?:jpg|png|webp)$/i.test(path)) {
+        return res.status(404).json({ success: false, message: "برای این درخواست رسیدی ثبت نشده است" });
+      }
+
+      const signed = await fetch(
+        base + "/storage/v1/object/sign/wallet-receipts/" +
+          path.split("/").map(encodeURIComponent).join("/"),
+        {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ expiresIn: 300 })
+        }
+      );
+
+      if (!signed.ok) {
+        console.error("WALLET_RECEIPT_SIGN_ERROR:", signed.status);
+        return res.status(503).json({ success: false, message: "ساخت لینک موقت رسید ناموفق بود" });
+      }
+
+      const result = await signed.json();
+      let signedURL = result.signedURL || result.signedUrl;
+      if (!signedURL) {
+        return res.status(503).json({ success: false, message: "لینک رسید دریافت نشد" });
+      }
+      if (signedURL.startsWith("/object/")) signedURL = base + "/storage/v1" + signedURL;
+      else if (signedURL.startsWith("/storage/v1/")) signedURL = base + signedURL;
+      else if (!/^https?:\/\//i.test(signedURL)) {
+        return res.status(503).json({ success: false, message: "آدرس رسید نامعتبر است" });
+      }
+
+      return res.json({ success: true, url: signedURL, expires_in: 300 });
+    } catch (e) {
+      console.error("WALLET_RECEIPT_VIEW_ERROR:", String(e.message || e).slice(0, 120));
+      return res.status(503).json({ success: false, message: "خطا در نمایش رسید" });
     }
   });
 

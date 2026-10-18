@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   next();
 });
 const adminAuth = require("./admin-auth");
-app.use(express.json());
+app.use(express.json({ limit: "5mb" }));
 
 const fs = require("fs");
 const ORDERS_FILE = "./orders.json";
@@ -537,7 +537,7 @@ app.get("/admin", async (req, res) => {
       walletLoadError = "تنظیمات پایگاه داده کامل نیست";
     } else {
       const r = await fetch(u.replace(/\/$/, "") +
-        "/rest/v1/wallet_deposits?select=id,user_id,amount,payment_reference,status,created_at,reviewed_at&order=created_at.desc&limit=200",
+        "/rest/v1/wallet_deposits?select=id,user_id,amount,payment_reference,receipt_path,status,created_at,reviewed_at&order=created_at.desc&limit=200",
         { headers: { apikey: k, Authorization: "Bearer " + k } });
       if (!r.ok) walletLoadError = "خواندن درخواست‌های شارژ ناموفق بود";
       else walletDeposits = await r.json();
@@ -554,6 +554,10 @@ app.get("/admin", async (req, res) => {
       <td class="wallet-status">${escapeHtml(d.status)}</td>
       <td>${escapeHtml(d.created_at || "")}</td>
       <td>
+        ${d.receipt_path ? `
+          <button class="wallet-receipt" data-id="${escapeHtml(d.id)}">مشاهده رسید</button>
+        ` : "رسید ثبت نشده"}
+        <small class="wallet-receipt-result" aria-live="polite"></small>
         ${d.status === "pending" ? `
           <button class="wallet-review" data-id="${escapeHtml(d.id)}" data-status="approved">تأیید شارژ</button>
           <button class="wallet-review" data-id="${escapeHtml(d.id)}" data-status="rejected">رد شارژ</button>
@@ -636,6 +640,48 @@ document.querySelectorAll(".wallet-review").forEach(button => {
     } catch (error) {
       result.textContent = error.message || "ارتباط برقرار نشد";
       buttons.forEach(b => b.disabled = false);
+    }
+  });
+});
+
+
+document.querySelectorAll(".wallet-receipt").forEach(button => {
+  button.addEventListener("click", async () => {
+    const row = button.closest("tr");
+    const result = row.querySelector(".wallet-receipt-result");
+    const originalText = button.textContent;
+    const preview = window.open("about:blank", "_blank");
+
+    if (preview) {
+      preview.document.write("<p dir='rtl'>در حال دریافت رسید امن...</p>");
+    }
+
+    button.disabled = true;
+    result.textContent = "در حال دریافت رسید...";
+    try {
+      const response = await fetch(
+        "/api/admin/wallet-deposits/" +
+        encodeURIComponent(button.dataset.id) + "/receipt",
+        { method: "GET", credentials: "same-origin" }
+      );
+
+      const body = await response.json();
+      if (!response.ok || !body.success || !body.url) {
+        throw new Error(body.message || "دریافت رسید ناموفق بود");
+      }
+
+      if (preview) {
+        preview.location.replace(body.url);
+      } else {
+        window.location.assign(body.url);
+      }
+      result.textContent = "رسید آماده مشاهده است؛ لینک موقت ۵ دقیقه اعتبار دارد.";
+    } catch (error) {
+      if (preview) preview.close();
+      result.textContent = error.message || "ارتباط برقرار نشد";
+    } finally {
+      button.disabled = false;
+      button.textContent = originalText;
     }
   });
 });
