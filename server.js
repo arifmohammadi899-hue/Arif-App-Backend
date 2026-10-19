@@ -730,11 +730,11 @@ app.get("/api/app-version", (req, res) => {
   res.set("Cache-Control", "no-store");
   res.json({
     success: true,
-    versionCode: Number(process.env.APP_VERSION_CODE || 3),
-    versionName: process.env.APP_VERSION_NAME || "1.2",
-    downloadUrl: process.env.APP_APK_URL || "",
+    versionCode: Number(process.env.APP_VERSION_CODE || 4),
+    versionName: process.env.APP_VERSION_NAME || "1.3",
+    downloadUrl: process.env.APP_APK_URL || "https://github.com/arifmohammadi899-hue/ArifApp2026/releases/download/v1.3/ARIF-APP.apk",
     forceUpdate: process.env.APP_FORCE_UPDATE === "true",
-    releaseNotes: process.env.APP_RELEASE_NOTES || "بهبود عملکرد برنامه"
+    releaseNotes: process.env.APP_RELEASE_NOTES || "نسخه 1.3: بهبود عملکرد برنامه و آماده‌سازی سیستم به‌روزرسانی."
   });
 });
 
