@@ -726,6 +726,18 @@ document.querySelectorAll(".balance-form").forEach(form => {
 require("./otp")(app);
 // SMS OTP disabled
 
+app.get("/api/app-version", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({
+    success: true,
+    versionCode: Number(process.env.APP_VERSION_CODE || 3),
+    versionName: process.env.APP_VERSION_NAME || "1.2",
+    downloadUrl: process.env.APP_APK_URL || "",
+    forceUpdate: process.env.APP_FORCE_UPDATE === "true",
+    releaseNotes: process.env.APP_RELEASE_NOTES || "بهبود عملکرد برنامه"
+  });
+});
+
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", () => {
