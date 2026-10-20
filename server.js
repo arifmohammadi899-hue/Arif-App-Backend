@@ -723,6 +723,187 @@ document.querySelectorAll(".balance-form").forEach(form => {
 </html>`);
 });
 
+
+/* MARKETPLACE_API_V1 */
+const marketCrypto = require("crypto");
+
+function marketSession(req) {
+  const secret = process.env.ARIF_SESSION_SECRET;
+  const match = String(req.headers.authorization || "").match(/^Bearer (.+)$/i);
+  if (!secret || !match) return null;
+
+  try {
+    const parts = match[1].split(".");
+    if (parts.length !== 2) return null;
+
+    const expected = marketCrypto.createHmac("sha256", secret)
+      .update(parts[0]).digest();
+    const actual = Buffer.from(parts[1], "base64url");
+
+    if (actual.length !== expected.length ||
+        !marketCrypto.timingSafeEqual(actual, expected)) return null;
+
+    const payload = JSON.parse(Buffer.from(parts[0], "base64url").toString());
+    if (!payload.email || !Number.isFinite(payload.exp) ||
+        payload.exp <= Math.floor(Date.now() / 1000)) return null;
+
+    return { email: String(payload.email).trim().toLowerCase() };
+  } catch (_) {
+    return null;
+  }
+}
+
+function marketConfig() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error("database_not_configured");
+  return { base: url.replace(/\/$/, ""), key };
+}
+
+async function marketUser(email) {
+  const { base, key } = marketConfig();
+  const q = new URLSearchParams({
+    select: "id,email",
+    email: "eq." + email,
+    limit: "1"
+  });
+  const r = await fetch(base + "/rest/v1/app_users?" + q, {
+    headers: { apikey: key, Authorization: "Bearer " + key }
+  });
+  if (!r.ok) throw new Error("user_lookup_failed");
+  const rows = await r.json();
+  return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+app.get("/api/marketplace/ads", async (req, res) => {
+  try {
+    const { base, key } = marketConfig();
+    const q = new URLSearchParams({
+      select: "id,user_id,category,title,price,description,phone,photos,video_url,seller,created_at",
+      order: "created_at.desc",
+      limit: "100"
+    });
+    if (req.query.category && String(req.query.category) !== "همه") {
+      q.set("category", "eq." + String(req.query.category).slice(0, 80));
+    }
+    const r = await fetch(base + "/rest/v1/marketplace_ads?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!r.ok) {
+      console.error("MARKETPLACE_LIST_ERROR:", r.status, (await r.text()).slice(0, 200));
+      return res.status(503).json({ success: false, message: "خواندن آگهی‌ها ناموفق بود" });
+    }
+    return res.json({ success: true, ads: await r.json() });
+  } catch (e) {
+    console.error("MARKETPLACE_LIST_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
+  }
+});
+
+app.post("/api/marketplace/ads", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "برای ثبت آگهی ابتدا وارد حساب شوید" });
+  }
+
+  const category = String(req.body.category || "").trim().slice(0, 80);
+  const title = String(req.body.title || "").trim();
+  const price = Number(req.body.price);
+  const description = String(req.body.description || "").trim().slice(0, 5000);
+  const phone = String(req.body.phone || "").trim().slice(0, 25);
+
+  if (!category || !title || title.length > 120 ||
+      !Number.isSafeInteger(price) || price < 0 || price > 9000000000000000) {
+    return res.status(400).json({ success: false, message: "دسته‌بندی، عنوان یا قیمت معتبر نیست" });
+  }
+
+  // رسانه‌ها باید در Storage آپلود شوند؛ دریافت Data URL در این مسیر مجاز نیست.
+  const photos = Array.isArray(req.body.photos) ? req.body.photos : [];
+  if (photos.length || req.body.video || req.body.video_url) {
+    return res.status(400).json({
+      success: false,
+      message: "آپلود آنلاین عکس و ویدیو هنوز فعال نشده است؛ فعلاً آگهی متنی ثبت کنید"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const r = await fetch(base + "/rest/v1/marketplace_ads", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        user_id: user.id,
+        category,
+        title,
+        price,
+        description,
+        phone,
+        photos: [],
+        video_url: "",
+        seller: session.email
+      })
+    });
+
+    if (!r.ok) {
+      console.error("MARKETPLACE_CREATE_ERROR:", r.status, (await r.text()).slice(0, 200));
+      return res.status(503).json({ success: false, message: "ثبت آگهی ناموفق بود" });
+    }
+    const rows = await r.json();
+    return res.status(201).json({ success: true, ad: rows[0] });
+  } catch (e) {
+    console.error("MARKETPLACE_CREATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
+  }
+});
+
+app.delete("/api/marketplace/ads/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ورود معتبر لازم است" });
+
+  const id = String(req.params.id || "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({ id: "eq." + id, user_id: "eq." + user.id });
+    const r = await fetch(base + "/rest/v1/marketplace_ads?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=representation"
+      }
+    });
+    if (!r.ok) {
+      console.error("MARKETPLACE_DELETE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "حذف آگهی ناموفق بود" });
+    }
+    const rows = await r.json();
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "آگهی پیدا نشد یا متعلق به شما نیست" });
+    }
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("MARKETPLACE_DELETE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
+  }
+});
+/* END MARKETPLACE_API_V1 */
+
+
 require("./otp")(app);
 // SMS OTP disabled
 
