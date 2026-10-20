@@ -904,6 +904,349 @@ app.delete("/api/marketplace/ads/:id", async (req, res) => {
 /* END MARKETPLACE_API_V1 */
 
 
+
+/* ARIF_CHAT_API_V1 */
+
+async function arifChatConversation(conversationId, userId) {
+  const { base, key } = marketConfig();
+  const q = new URLSearchParams({
+    select: "id,user_one_id,user_two_id",
+    id: "eq." + conversationId,
+    limit: "1"
+  });
+  const r = await fetch(base + "/rest/v1/chat_conversations?" + q, {
+    headers: { apikey: key, Authorization: "Bearer " + key }
+  });
+  if (!r.ok) throw new Error("chat_conversation_lookup_failed");
+  const rows = await r.json();
+  const c = Array.isArray(rows) ? rows[0] : null;
+  if (!c) return null;
+  if (Number(c.user_one_id) !== Number(userId) &&
+      Number(c.user_two_id) !== Number(userId)) return null;
+  return c;
+}
+
+async function arifChatSignedImage(path) {
+  const { base, key } = marketConfig();
+  const objectPath = String(path || "").split("/").map(encodeURIComponent).join("/");
+  const r = await fetch(base + "/storage/v1/object/sign/chat-images/" + objectPath, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      Authorization: "Bearer " + key,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ expiresIn: 3600 })
+  });
+  if (!r.ok) return null;
+  const data = await r.json();
+  const signed = String(data.signedURL || data.signedUrl || "");
+  if (!signed) return null;
+  if (/^https?:\/\//i.test(signed)) return signed;
+  return base + "/storage/v1" + (signed.startsWith("/") ? signed : "/" + signed);
+}
+
+app.post("/api/chat/conversations", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const adId = String(req.body.ad_id || "").trim();
+  if (!adId || adId.length > 100) {
+    return res.status(400).json({ success: false, message: "آگهی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const aq = new URLSearchParams({
+      select: "id,user_id,title",
+      id: "eq." + adId,
+      limit: "1"
+    });
+    const ar = await fetch(base + "/rest/v1/marketplace_ads?" + aq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!ar.ok) throw new Error("chat_ad_lookup_failed");
+    const ads = await ar.json();
+    const ad = Array.isArray(ads) ? ads[0] : null;
+    if (!ad) return res.status(404).json({ success: false, message: "آگهی پیدا نشد" });
+
+    const sellerId = Number(ad.user_id);
+    const myId = Number(me.id);
+    if (!Number.isSafeInteger(sellerId) || !Number.isSafeInteger(myId)) {
+      return res.status(503).json({ success: false, message: "شناسه حساب معتبر نیست" });
+    }
+    if (sellerId === myId) {
+      return res.status(400).json({ success: false, message: "نمی‌توانید به خودتان پیام بدهید" });
+    }
+
+    const payload = {
+      user_one_id: Math.min(myId, sellerId),
+      user_two_id: Math.max(myId, sellerId)
+    };
+    const cq = new URLSearchParams({ on_conflict: "user_one_id,user_two_id" });
+    const cr = await fetch(base + "/rest/v1/chat_conversations?" + cq, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=representation"
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!cr.ok) {
+      console.error("ARIF_CHAT_CONVERSATION_ERROR:", cr.status, (await cr.text()).slice(0, 200));
+      return res.status(503).json({ success: false, message: "ساخت گفت‌وگو ناموفق بود" });
+    }
+    const rows = await cr.json();
+    const conversation = Array.isArray(rows) ? rows[0] : null;
+    if (!conversation) {
+      return res.status(503).json({ success: false, message: "گفت‌وگو دریافت نشد" });
+    }
+    return res.json({
+      success: true,
+      conversation,
+      other_user_id: sellerId,
+      ad_title: String(ad.title || "")
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_OPEN_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال چت برقرار نشد" });
+  }
+});
+
+app.get("/api/chat/conversations/:id/messages", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({
+      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at",
+      conversation_id: "eq." + conversationId,
+      order: "created_at.asc",
+      limit: "200"
+    });
+    const r = await fetch(base + "/rest/v1/chat_messages?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!r.ok) throw new Error("chat_messages_read_failed");
+    const messages = await r.json();
+
+    const result = await Promise.all((Array.isArray(messages) ? messages : []).map(async m => ({
+      id: m.id,
+      conversation_id: m.conversation_id,
+      sender_id: m.sender_id,
+      message_type: m.message_type,
+      message_text: m.message_text,
+      image_url: m.message_type === "image" ? await arifChatSignedImage(m.image_path) : null,
+      created_at: m.created_at
+    })));
+
+    return res.json({ success: true, messages: result });
+  } catch (e) {
+    console.error("ARIF_CHAT_MESSAGES_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "دریافت پیام‌ها ناموفق بود" });
+  }
+});
+
+app.post("/api/chat/conversations/:id/messages", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const messageText = String(req.body.message_text || "").trim();
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+  if (!messageText || messageText.length > 5000) {
+    return res.status(400).json({ success: false, message: "پیام باید بین ۱ تا ۵۰۰۰ حرف باشد" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const r = await fetch(base + "/rest/v1/chat_messages", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        conversation_id: Number(conversationId),
+        sender_id: me.id,
+        message_type: "text",
+        message_text: messageText,
+        image_path: null
+      })
+    });
+    if (!r.ok) {
+      console.error("ARIF_CHAT_SEND_ERROR:", r.status, (await r.text()).slice(0, 200));
+      return res.status(503).json({ success: false, message: "ذخیره پیام ناموفق بود" });
+    }
+
+    await fetch(base + "/rest/v1/chat_conversations?id=eq." + encodeURIComponent(conversationId), {
+      method: "PATCH",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({ last_message_at: new Date().toISOString() })
+    });
+
+    const rows = await r.json();
+    return res.status(201).json({ success: true, message: Array.isArray(rows) ? rows[0] : null });
+  } catch (e) {
+    console.error("ARIF_CHAT_SEND_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ارسال پیام ناموفق بود" });
+  }
+});
+
+app.post("/api/chat/conversations/:id/images", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const dataUrl = String(req.body.image_data || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  const match = dataUrl.match(/^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=\r\n]+)$/);
+  if (!match) {
+    return res.status(400).json({ success: false, message: "عکس باید JPG یا PNG یا WEBP باشد" });
+  }
+  const buffer = Buffer.from(match[2].replace(/\s/g, ""), "base64");
+  if (!buffer.length || buffer.length > 2500000) {
+    return res.status(400).json({ success: false, message: "حجم عکس نباید بیشتر از ۲٫۵ مگابایت باشد" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[match[1]];
+    const imagePath = conversationId + "/" + me.id + "/" + require("crypto").randomUUID() + "." + ext;
+    const storageUrl = base + "/storage/v1/object/chat-images/" +
+      imagePath.split("/").map(encodeURIComponent).join("/");
+
+    const upload = await fetch(storageUrl, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": match[1],
+        "x-upsert": "false"
+      },
+      body: buffer
+    });
+
+    if (!upload.ok) {
+      console.error("ARIF_CHAT_IMAGE_UPLOAD_ERROR:", upload.status);
+      return res.status(503).json({
+        success: false,
+        message: "آپلود عکس انجام نشد؛ باکت خصوصی chat-images را در Supabase بسازید"
+      });
+    }
+
+    const r = await fetch(base + "/rest/v1/chat_messages", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        conversation_id: Number(conversationId),
+        sender_id: me.id,
+        message_type: "image",
+        message_text: null,
+        image_path: imagePath
+      })
+    });
+
+    if (!r.ok) {
+      await fetch(storageUrl, {
+        method: "DELETE",
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      }).catch(() => {});
+      console.error("ARIF_CHAT_IMAGE_DB_ERROR:", r.status, (await r.text()).slice(0, 200));
+      return res.status(503).json({ success: false, message: "ثبت عکس در گفت‌وگو ناموفق بود" });
+    }
+
+    await fetch(base + "/rest/v1/chat_conversations?id=eq." + encodeURIComponent(conversationId), {
+      method: "PATCH",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({ last_message_at: new Date().toISOString() })
+    });
+
+    const rows = await r.json();
+    const message = Array.isArray(rows) ? rows[0] : null;
+    return res.status(201).json({
+      success: true,
+      message: message ? {
+        id: message.id,
+        conversation_id: message.conversation_id,
+        sender_id: message.sender_id,
+        message_type: "image",
+        image_url: await arifChatSignedImage(imagePath),
+        created_at: message.created_at
+      } : null
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_IMAGE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ارسال عکس ناموفق بود" });
+  }
+});
+
+
 require("./otp")(app);
 // SMS OTP disabled
 
