@@ -1377,7 +1377,7 @@ app.post("/api/awareness/posts", async (req, res) => {
       const { base, key } = marketConfig();
       const objectPath = mediaPath.split("/").map(encodeURIComponent).join("/");
       const upload = await fetch(
-        base + "/storage/v1/object/marketplace-media/" + objectPath,
+        base + "/storage/v1/object/awareness-media/" + objectPath,
         {
           method: "POST",
           headers: {
@@ -1431,7 +1431,7 @@ app.post("/api/awareness/posts", async (req, res) => {
 
       if (uploadedPath) {
         const objectPath = uploadedPath.split("/").map(encodeURIComponent).join("/");
-        await fetch(base + "/storage/v1/object/marketplace-media/" + objectPath, {
+        await fetch(base + "/storage/v1/object/awareness-media/" + objectPath, {
           method: "DELETE",
           headers: { apikey: key, Authorization: "Bearer " + key }
         }).catch(() => {});
