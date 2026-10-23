@@ -1254,7 +1254,7 @@ async function arifAwarenessSignedMedia(path) {
   const { base, key } = marketConfig();
   const objectPath = String(path || "").split("/").map(encodeURIComponent).join("/");
   const r = await fetch(
-    base + "/storage/v1/object/sign/marketplace-media/" + objectPath,
+    base + "/storage/v1/object/sign/awareness-media/" + objectPath,
     {
       method: "POST",
       headers: {
