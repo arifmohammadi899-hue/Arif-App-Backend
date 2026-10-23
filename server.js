@@ -1247,6 +1247,229 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
 });
 
 
+
+/* ARIF_AWARENESS_API_V1 */
+
+async function arifAwarenessSignedMedia(path) {
+  const { base, key } = marketConfig();
+  const objectPath = String(path || "").split("/").map(encodeURIComponent).join("/");
+  const r = await fetch(
+    base + "/storage/v1/object/sign/marketplace-media/" + objectPath,
+    {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ expiresIn: 3600 })
+    }
+  );
+  if (!r.ok) return null;
+  const data = await r.json();
+  const signed = String(data.signedURL || data.signedUrl || "");
+  if (!signed) return null;
+  if (/^https?:\/\//i.test(signed)) return signed;
+  return base + "/storage/v1" + (signed.startsWith("/") ? signed : "/" + signed);
+}
+
+app.get("/api/awareness/posts", async (req, res) => {
+  try {
+    const { base, key } = marketConfig();
+    const q = new URLSearchParams({
+      select: "id,user_id,content,media_type,media_path,created_at",
+      order: "created_at.desc",
+      limit: "100"
+    });
+    const r = await fetch(base + "/rest/v1/awareness_posts?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!r.ok) throw new Error("awareness_posts_read_failed");
+
+    const rows = await r.json();
+    const posts = await Promise.all((Array.isArray(rows) ? rows : []).map(async post => ({
+      id: post.id,
+      user_id: post.user_id,
+      author: "کاربر #" + post.user_id,
+      content: post.content || "",
+      media_type: post.media_type || "text",
+      media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
+      created_at: post.created_at
+    })));
+
+    return res.json({ success: true, posts });
+  } catch (e) {
+    console.error("AWARENESS_LIST_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({
+      success: false,
+      message: "دریافت پست‌های آگاهی ناموفق بود"
+    });
+  }
+});
+
+app.post("/api/awareness/posts", async (req, res) => {
+  let uploadedPath = null;
+
+  try {
+    const session = marketSession(req);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: "ابتدا وارد حساب شوید"
+      });
+    }
+
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const content = String(req.body.content || "").trim();
+    const dataUrl = String(req.body.media_data || "");
+    let mediaType = "text";
+    let mediaPath = null;
+    let mediaBuffer = null;
+    let mime = "";
+
+    if (content.length > 5000) {
+      return res.status(400).json({
+        success: false,
+        message: "متن پست نباید بیشتر از ۵۰۰۰ حرف باشد"
+      });
+    }
+
+    if (dataUrl) {
+      const match = dataUrl.match(/^data:(image\/(?:jpeg|png|webp)|video\/(?:mp4|quicktime|webm));base64,([A-Za-z0-9+/=\r\n]+)$/);
+      if (!match) {
+        return res.status(400).json({
+          success: false,
+          message: "نوع فایل پشتیبانی نمی‌شود"
+        });
+      }
+
+      mime = match[1];
+      mediaBuffer = Buffer.from(match[2], "base64");
+
+      if (!mediaBuffer.length || mediaBuffer.length > 2500000) {
+        return res.status(400).json({
+          success: false,
+          message: "حجم عکس یا ویدیو باید حداکثر ۲٫۵ مگابایت باشد"
+        });
+      }
+
+      mediaType = mime.startsWith("image/") ? "image" : "video";
+
+      const extByMime = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "video/mp4": "mp4",
+        "video/quicktime": "mov",
+        "video/webm": "webm"
+      };
+      const crypto = require("crypto");
+      mediaPath = "awareness/" + user.id + "/" +
+        crypto.randomUUID() + "." + extByMime[mime];
+
+      const { base, key } = marketConfig();
+      const objectPath = mediaPath.split("/").map(encodeURIComponent).join("/");
+      const upload = await fetch(
+        base + "/storage/v1/object/marketplace-media/" + objectPath,
+        {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key,
+            "Content-Type": mime,
+            "x-upsert": "false"
+          },
+          body: mediaBuffer
+        }
+      );
+
+      if (!upload.ok) {
+        const detail = await upload.text().catch(() => "");
+        console.error("AWARENESS_UPLOAD_ERROR:", upload.status, detail.slice(0, 200));
+        return res.status(503).json({
+          success: false,
+          message: "ذخیره عکس یا ویدیو ناموفق بود؛ تنظیمات باکت را بررسی کنید"
+        });
+      }
+      uploadedPath = mediaPath;
+    }
+
+    if (!content && !mediaPath) {
+      return res.status(400).json({
+        success: false,
+        message: "متن یا عکس یا ویدیو وارد کنید"
+      });
+    }
+
+    const { base, key } = marketConfig();
+    const insert = await fetch(base + "/rest/v1/awareness_posts", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify([{
+        user_id: user.id,
+        content,
+        media_type: mediaType,
+        media_path: mediaPath
+      }])
+    });
+
+    if (!insert.ok) {
+      const detail = await insert.text().catch(() => "");
+      console.error("AWARENESS_INSERT_ERROR:", insert.status, detail.slice(0, 200));
+
+      if (uploadedPath) {
+        const objectPath = uploadedPath.split("/").map(encodeURIComponent).join("/");
+        await fetch(base + "/storage/v1/object/marketplace-media/" + objectPath, {
+          method: "DELETE",
+          headers: { apikey: key, Authorization: "Bearer " + key }
+        }).catch(() => {});
+      }
+
+      return res.status(503).json({
+        success: false,
+        message: "ذخیره پست در پایگاه داده ناموفق بود"
+      });
+    }
+
+    const rows = await insert.json();
+    const post = Array.isArray(rows) ? rows[0] : null;
+
+    return res.status(201).json({
+      success: true,
+      post: post ? {
+        id: post.id,
+        user_id: post.user_id,
+        author: "کاربر #" + post.user_id,
+        content: post.content || "",
+        media_type: post.media_type || "text",
+        media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
+        created_at: post.created_at
+      } : null
+    });
+  } catch (e) {
+    console.error("AWARENESS_CREATE_ERROR:", String(e.message || e).slice(0, 180));
+    return res.status(503).json({
+      success: false,
+      message: "ثبت پست آگاهی ناموفق بود"
+    });
+  }
+});
+
+/* END ARIF_AWARENESS_API_V1 */
+
+
 require("./otp")(app);
 // SMS OTP disabled
 
