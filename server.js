@@ -281,6 +281,11 @@ app.delete("/api/orders/:id", async (req, res) => {
 });
 
 app.get("/admin/login", (req, res) => {
+  console.log("ADMIN_IP_DIAGNOSTIC:", JSON.stringify({
+    ip: req.ip || null,
+    remoteAddress: req.socket?.remoteAddress || null,
+    forwardedForPresent: Boolean(req.headers["x-forwarded-for"])
+  }));
   res.set("Cache-Control", "no-store");
   if (adminAuth.isAdmin(req)) return res.redirect("/admin");
   res.type("html").send(`<!doctype html>
