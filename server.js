@@ -14,7 +14,7 @@ app.use((req, res, next) => {
   next();
 });
 const adminAuth = require("./admin-auth");
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "35mb" }));
 
 const fs = require("fs");
 const ORDERS_FILE = "./orders.json";
@@ -730,29 +730,34 @@ const marketCrypto = require("crypto");
 function marketSession(req) {
   const secret = process.env.ARIF_SESSION_SECRET;
   const match = String(req.headers.authorization || "").match(/^Bearer (.+)$/i);
-  if (!secret || !match) return null;
+  let reason = "";
 
-  try {
-    const parts = match[1].split(".");
-    if (parts.length !== 2) return null;
-
-    const expected = marketCrypto.createHmac("sha256", secret)
-      .update(parts[0]).digest();
-    const actual = Buffer.from(parts[1], "base64url");
-
-    if (actual.length !== expected.length ||
-        !marketCrypto.timingSafeEqual(actual, expected)) return null;
-
-    const payload = JSON.parse(Buffer.from(parts[0], "base64url").toString());
-    if (!payload.email || !Number.isFinite(payload.exp) ||
-        payload.exp <= Math.floor(Date.now() / 1000)) return null;
-
-    return { email: String(payload.email).trim().toLowerCase() };
-  } catch (_) {
-    return null;
+  if (!secret) reason = "missing_server_secret";
+  else if (!match) reason = "missing_bearer_token";
+  else {
+    try {
+      const parts = match[1].split(".");
+      if (parts.length !== 2) reason = "malformed_token";
+      else {
+        const expected = marketCrypto.createHmac("sha256", secret).update(parts[0]).digest();
+        const actual = Buffer.from(parts[1], "base64url");
+        if (actual.length !== expected.length ||
+            !marketCrypto.timingSafeEqual(actual, expected)) reason = "signature_mismatch";
+        else {
+          const payload = JSON.parse(Buffer.from(parts[0], "base64url").toString());
+          if (!payload.email || !Number.isFinite(payload.exp)) reason = "invalid_payload";
+          else if (payload.exp <= Math.floor(Date.now() / 1000)) reason = "expired_token";
+          else return { email: String(payload.email).trim().toLowerCase() };
+        }
+      }
+    } catch (_) {
+      reason = "token_parse_error";
+    }
   }
-}
 
+  console.warn("MARKET_AUTH_REJECT:", reason);
+  return null;
+}
 function marketConfig() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -775,6 +780,89 @@ async function marketUser(email) {
   return Array.isArray(rows) && rows.length ? rows[0] : null;
 }
 
+
+async function marketUploadMedia(base, key, userId, dataUrl, kind) {
+  const match = /^data:(image\/(?:jpeg|png|webp)|video\/(?:mp4|quicktime|webm));base64,([A-Za-z0-9+/=]+)$/.exec(String(dataUrl || ""));
+  if (!match) throw new Error("فرمت رسانه معتبر نیست");
+
+  const mime = match[1];
+  const buffer = Buffer.from(match[2], "base64");
+  const isVideo = mime.startsWith("video/");
+  const maxBytes = isVideo ? 20000000 : 2500000;
+
+  if (!buffer.length || buffer.length > maxBytes) {
+    throw new Error(isVideo ? "حجم ویدیو باید حداکثر ۲۰ مگابایت باشد" : "حجم هر عکس باید حداکثر ۲٫۵ مگابایت باشد");
+  }
+
+  const ext = ({
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm"
+  })[mime];
+
+  const path = String(userId) + "/" + marketCrypto.randomUUID() + "." + ext;
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const r = await fetch(base + "/storage/v1/object/marketplace-media/" + encodedPath, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      Authorization: "Bearer " + key,
+      "Content-Type": mime,
+      "x-upsert": "false"
+    },
+    body: buffer
+  });
+
+  if (!r.ok) {
+    console.error("MARKETPLACE_MEDIA_UPLOAD_ERROR:", r.status, (await r.text()).slice(0, 180));
+    throw new Error("آپلود عکس یا ویدیو ناموفق شد؛ تنظیمات Storage را بررسی کنید");
+  }
+  return path;
+}
+
+async function marketSignedMedia(base, key, path) {
+  if (!path || /^https?:\/\//i.test(String(path))) return path || "";
+  const encodedPath = String(path).split("/").map(encodeURIComponent).join("/");
+  const r = await fetch(base + "/storage/v1/object/sign/marketplace-media/" + encodedPath, {
+    method: "POST",
+    headers: {
+      apikey: key,
+      Authorization: "Bearer " + key,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ expiresIn: 3600 })
+  });
+
+  if (!r.ok) {
+    console.error("MARKETPLACE_MEDIA_SIGN_ERROR:", r.status);
+    return "";
+  }
+
+  const data = await r.json();
+  const signed = data.signedURL || data.signedUrl || "";
+  if (!signed) return "";
+  return /^https?:\/\//i.test(signed) ? signed : base + (signed.startsWith("/") ? signed : "/" + signed);
+}
+
+async function marketDeleteUploadedMedia(base, key, paths) {
+  const clean = paths.filter(Boolean);
+  if (!clean.length) return;
+  try {
+    await fetch(base + "/storage/v1/object/marketplace-media", {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ prefixes: clean })
+    });
+  } catch (_) {}
+}
+
 app.get("/api/marketplace/ads", async (req, res) => {
   try {
     const { base, key } = marketConfig();
@@ -783,17 +871,29 @@ app.get("/api/marketplace/ads", async (req, res) => {
       order: "created_at.desc",
       limit: "100"
     });
+
     if (req.query.category && String(req.query.category) !== "همه") {
       q.set("category", "eq." + String(req.query.category).slice(0, 80));
     }
+
     const r = await fetch(base + "/rest/v1/marketplace_ads?" + q, {
       headers: { apikey: key, Authorization: "Bearer " + key }
     });
+
     if (!r.ok) {
       console.error("MARKETPLACE_LIST_ERROR:", r.status, (await r.text()).slice(0, 200));
       return res.status(503).json({ success: false, message: "خواندن آگهی‌ها ناموفق بود" });
     }
-    return res.json({ success: true, ads: await r.json() });
+
+    const rows = await r.json();
+    const ads = await Promise.all(rows.map(async ad => {
+      const storedPhotos = Array.isArray(ad.photos) ? ad.photos : [];
+      const photos = await Promise.all(storedPhotos.map(path => marketSignedMedia(base, key, path)));
+      const video_url = await marketSignedMedia(base, key, ad.video_url || "");
+      return { ...ad, photos: photos.filter(Boolean), video_url };
+    }));
+
+    return res.json({ success: true, ads });
   } catch (e) {
     console.error("MARKETPLACE_LIST_ERROR:", String(e.message || e).slice(0, 150));
     return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
@@ -811,25 +911,41 @@ app.post("/api/marketplace/ads", async (req, res) => {
   const price = Number(req.body.price);
   const description = String(req.body.description || "").trim().slice(0, 5000);
   const phone = String(req.body.phone || "").trim().slice(0, 25);
+  const photos = Array.isArray(req.body.photos) ? req.body.photos : [];
+  const video = String(req.body.video || req.body.video_url || "");
 
   if (!category || !title || title.length > 120 ||
       !Number.isSafeInteger(price) || price < 0 || price > 9000000000000000) {
     return res.status(400).json({ success: false, message: "دسته‌بندی، عنوان یا قیمت معتبر نیست" });
   }
-
-  // رسانه‌ها باید در Storage آپلود شوند؛ دریافت Data URL در این مسیر مجاز نیست.
-  const photos = Array.isArray(req.body.photos) ? req.body.photos : [];
-  if (photos.length || req.body.video || req.body.video_url) {
-    return res.status(400).json({
-      success: false,
-      message: "آپلود آنلاین عکس و ویدیو هنوز فعال نشده است؛ فعلاً آگهی متنی ثبت کنید"
-    });
+  if (photos.length > 3) {
+    return res.status(400).json({ success: false, message: "حداکثر ۳ عکس انتخاب کنید" });
+  }
+  const totalEncoded = photos.reduce((sum, item) => sum + String(item || "").length, 0) + video.length;
+  if (totalEncoded > 33000000) {
+    return res.status(413).json({ success: false, message: "حجم مجموع عکس‌ها و ویدیو زیاد است؛ فایل‌های کوچک‌تری انتخاب کنید" });
   }
 
+  let base, key;
+  const uploaded = [];
+
   try {
-    const { base, key } = marketConfig();
+    ({ base, key } = marketConfig());
     const user = await marketUser(session.email);
     if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const storedPhotos = [];
+    for (const photo of photos) {
+      const path = await marketUploadMedia(base, key, user.id, photo, "image");
+      uploaded.push(path);
+      storedPhotos.push(path);
+    }
+
+    let storedVideo = "";
+    if (video) {
+      storedVideo = await marketUploadMedia(base, key, user.id, video, "video");
+      uploaded.push(storedVideo);
+    }
 
     const r = await fetch(base + "/rest/v1/marketplace_ads", {
       method: "POST",
@@ -846,21 +962,29 @@ app.post("/api/marketplace/ads", async (req, res) => {
         price,
         description,
         phone,
-        photos: [],
-        video_url: "",
+        photos: storedPhotos,
+        video_url: storedVideo,
         seller: session.email
       })
     });
 
     if (!r.ok) {
       console.error("MARKETPLACE_CREATE_ERROR:", r.status, (await r.text()).slice(0, 200));
-      return res.status(503).json({ success: false, message: "ثبت آگهی ناموفق بود" });
+      await marketDeleteUploadedMedia(base, key, uploaded);
+      return res.status(503).json({ success: false, message: "ثبت آگهی ناموفق بود؛ دوباره تلاش کنید" });
     }
+
     const rows = await r.json();
     return res.status(201).json({ success: true, ad: rows[0] });
   } catch (e) {
-    console.error("MARKETPLACE_CREATE_ERROR:", String(e.message || e).slice(0, 150));
-    return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
+    await marketDeleteUploadedMedia(base || "", key || "", uploaded);
+    console.error("MARKETPLACE_CREATE_ERROR:", String(e.message || e).slice(0, 180));
+    return res.status(400).json({
+      success: false,
+      message: String(e.message || "").includes("حجم") || String(e.message || "").includes("فرمت")
+        ? String(e.message)
+        : "ثبت آگهی یا آپلود رسانه ناموفق شد؛ اتصال و تنظیمات Storage را بررسی کنید"
+    });
   }
 });
 
