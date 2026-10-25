@@ -844,7 +844,9 @@ async function marketSignedMedia(base, key, path) {
   const data = await r.json();
   const signed = data.signedURL || data.signedUrl || "";
   if (!signed) return "";
-  return /^https?:\/\//i.test(signed) ? signed : base + (signed.startsWith("/") ? signed : "/" + signed);
+  if (/^https?:\/\//i.test(signed)) return signed;
+  const signedPath = signed.startsWith("/") ? signed : "/" + signed;
+  return base + (signedPath.startsWith("/storage/v1/") ? signedPath : "/storage/v1" + signedPath);
 }
 
 async function marketDeleteUploadedMedia(base, key, paths) {
