@@ -7,7 +7,7 @@ app.use((req, res, next) => {
   if (origin === "null") {
     res.setHeader("Access-Control-Allow-Origin", "null");
     res.setHeader("Vary", "Origin");
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   }
   if (req.method === "OPTIONS") return res.sendStatus(204);
