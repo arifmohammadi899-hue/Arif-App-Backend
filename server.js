@@ -90,13 +90,53 @@ app.get("/api/health", (req, res) => {
   });
 });
 
-app.post("/api/orders", (req, res) => {
-  const {
-    product,
-    price,
-    playerId,
-    tracking
-  } = req.body;
+
+function orderFromDb(row) {
+  return {
+    id: row.id,
+    product: row.product,
+    price: row.price,
+    playerId: row.player_id,
+    tracking: row.tracking,
+    status: row.status,
+    createdAt: row.created_at
+  };
+}
+
+async function orderDbRequest(path, options = {}) {
+  const base = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!base || !key) throw new Error("database_not_configured");
+
+  const response = await fetch(
+    base.replace(/\/$/, "") + "/rest/v1/" + path,
+    {
+      ...options,
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        ...(options.headers || {})
+      }
+    }
+  );
+
+  const body = await response.text();
+  let data = [];
+  if (body) {
+    try { data = JSON.parse(body); }
+    catch (_) { throw new Error("database_invalid_response"); }
+  }
+
+  if (!response.ok) {
+    console.error("ORDER_DATABASE_ERROR:", response.status, body.slice(0, 300));
+    throw new Error("database_request_failed");
+  }
+  return data;
+}
+
+app.post("/api/orders", async (req, res) => {
+  const { product, price, playerId, tracking } = req.body || {};
 
   if (!product || !price || !playerId || !tracking) {
     return res.status(400).json({
@@ -105,27 +145,44 @@ app.post("/api/orders", (req, res) => {
     });
   }
 
-  const order = {
-    id: nextOrderId++,
-    product: String(product),
-    price: String(price),
-    playerId: String(playerId),
-    tracking: String(tracking),
-    status: "pending",
-    createdAt: new Date().toISOString()
-  };
+  try {
+    const rows = await orderDbRequest("app_orders", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({
+        product: String(product),
+        price: String(price),
+        player_id: String(playerId),
+        tracking: String(tracking),
+        status: "pending"
+      })
+    });
 
-  orders.push(order);
-  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
+    if (!Array.isArray(rows) || !rows.length) {
+      throw new Error("database_empty_result");
+    }
 
-  res.status(201).json({
-    success: true,
-    message: "سفارش با موفقیت ثبت شد",
-    order
-  });
+    return res.status(201).json({
+      success: true,
+      message: "سفارش با موفقیت ثبت شد",
+      order: orderFromDb(rows[0])
+    });
+  } catch (error) {
+    if (String(error.message).includes("database_request_failed")) {
+      return res.status(500).json({
+        success: false,
+        message: "ثبت سفارش در پایگاه داده ناموفق بود؛ لطفاً دوباره تلاش کنید"
+      });
+    }
+    console.error("ORDER_CREATE_ERROR:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "خطا در ثبت سفارش"
+    });
+  }
 });
 
-app.get("/api/orders", (req, res) => {
+app.get("/api/orders", async (req, res) => {
   if (!adminAuth.isAdmin(req)) {
     return res.status(401).json({
       success: false,
@@ -133,147 +190,37 @@ app.get("/api/orders", (req, res) => {
     });
   }
 
-  res.set("Cache-Control", "no-store");
-  res.json({
-    success: true,
-    count: orders.length,
-    orders
-  });
-});
-
-
-
-app.get("/api/afgtopup/data-bundles", async (req, res) => {
   try {
-    const phone = String(req.query.phone || "").trim();
-
-    if (!phone) {
-      return res.status(400).json({
-        success: false,
-        message: "شماره موبایل وارد نشده است"
-      });
-    }
-
-    const apiKey = process.env.AFGTOPUP_API_KEY;
-
-    if (!apiKey) {
-      return res.status(500).json({
-        success: false,
-        message: "AFGTOPUP_API_KEY تنظیم نشده است"
-      });
-    }
-
-    const url = new URL(
-      "https://afgtopup.com/.netlify/functions/partner-data-bundles"
+    const rows = await orderDbRequest(
+      "app_orders?select=id,product,price,player_id,tracking,status,created_at&order=created_at.desc&limit=500"
     );
-    url.searchParams.set("phone", phone);
-
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "X-API-Key": apiKey
-      }
+    res.set("Cache-Control", "no-store");
+    return res.json({
+      success: true,
+      count: rows.length,
+      orders: rows.map(orderFromDb)
     });
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json(data);
-    }
-
-    const settings = JSON.parse(fs.readFileSync("./afgtopup-settings.json", "utf8"));
-    const eurRate = Number(settings.eur_to_toman) || 0;
-    const margin = Number(settings.margin_percent) || 0;
-    if (Array.isArray(data.bundles)) data.bundles = data.bundles.map(x => ({...x, cost_toman: Math.round(Number(x.eur_cost || 0) * eurRate), retail_price_toman: Math.round(Number(x.eur_cost || 0) * eurRate * (1 + margin / 100))}));
-    res.json(data);
   } catch (error) {
-    console.error("AFGTopup data bundles error:", error);
-    res.status(500).json({
+    console.error("ORDER_LIST_ERROR:", error.message);
+    return res.status(500).json({
       success: false,
-      message: "خطا در اتصال به AFGTopup"
+      message: "خواندن سفارش‌ها از پایگاه داده ناموفق بود"
     });
   }
 });
 
-
-app.post("/api/afgtopup/data-bundle-topup", async (req, res) => {
-  try {
-    const phone = String(req.body?.phone || "").trim();
-    const bundleId = String(req.body?.bundle_id || "").trim();
-    const externalId = String(req.body?.external_id || "").trim();
-
-    if (!phone || !bundleId || !externalId) {
-      return res.status(400).json({
-        success: false,
-        message: "phone، bundle_id و external_id الزامی هستند"
-      });
-    }
-
-    const apiKey = process.env.AFGTOPUP_API_KEY;
-
-    if (!apiKey) {
-      return res.status(500).json({
-        success: false,
-        message: "AFGTOPUP_API_KEY تنظیم نشده است"
-      });
-    }
-
-    const { execFile } = await import("child_process");
-
-    const payload = JSON.stringify({
-      phone,
-      bundle_id: bundleId,
-      external_id: externalId
-    });
-
-    execFile(
-      "curl",
-      [
-        "--http1.1",
-        "-sS",
-        "--max-time", "30",
-        "-X", "POST",
-        "https://afgtopup.com/.netlify/functions/partner-data-bundle-topup",
-        "-H", "Content-Type: application/json",
-        "-H", "X-API-Key: " + apiKey,
-        "-d", payload
-      ],
-      (error, stdout, stderr) => {
-        if (error) {
-          console.error("AFGTopup curl error:", stderr || error);
-          return res.status(502).json({
-            success: false,
-            message: "خطا در اتصال به AFGTopup"
-          });
-        }
-
-        try {
-          const data = JSON.parse(stdout);
-          res.json(data);
-        } catch (parseError) {
-          console.error("AFGTopup invalid JSON:", stdout);
-          res.status(502).json({
-            success: false,
-            message: "پاسخ نامعتبر از AFGTopup"
-          });
-        }
-      }
-    );
-  } catch (error) {
-    console.error("AFGTopup data bundle topup error:", error);
-    res.status(500).json({
-      success: false,
-      message: "خطا در اتصال به AFGTopup"
-    });
-  }
-});
-app.patch("/api/orders/:id/status", (req, res) => {
+app.patch("/api/orders/:id/status", async (req, res) => {
   const auth = req.headers.authorization || "";
   const adminUser = process.env.ADMIN_USER;
   const adminPassword = process.env.ADMIN_PASSWORD;
+
   if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
+    return res.status(503).json({
+      success: false,
+      message: "تنظیمات مدیر آماده نیست"
+    });
   }
+
   const expected = "Basic " + Buffer.from(
     adminUser + ":" + adminPassword
   ).toString("base64");
@@ -287,48 +234,60 @@ app.patch("/api/orders/:id/status", (req, res) => {
 
   const id = Number(req.params.id);
   const status = String(req.body.status || "").trim();
-
-  const allowed = ["pending", "completed", "cancelled"];
-
-  if (!allowed.includes(status)) {
-    return res.status(400).json({
-      success: false,
-      message: "وضعیت نامعتبر است"
-    });
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return res.status(400).json({ success: false, message: "شماره سفارش نامعتبر است" });
   }
 
-  const order = orders.find(order => Number(order.id) === id);
-
-  if (!order) {
-    return res.status(404).json({
-      success: false,
-      message: "سفارش پیدا نشد"
-    });
+  if (!["pending", "completed", "cancelled"].includes(status)) {
+    return res.status(400).json({ success: false, message: "وضعیت نامعتبر است" });
   }
 
-  order.status = status;
-  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
+  try {
+    const rows = await orderDbRequest(
+      "app_orders?id=eq." + id + "&select=id,product,price,player_id,tracking,status,created_at",
+      {
+        method: "PATCH",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ status })
+      }
+    );
 
-  res.json({
-    success: true,
-    message: "وضعیت سفارش تغییر کرد",
-    order
-  });
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(404).json({ success: false, message: "سفارش پیدا نشد" });
+    }
+
+    return res.json({
+      success: true,
+      message: "وضعیت سفارش تغییر کرد",
+      order: orderFromDb(rows[0])
+    });
+  } catch (error) {
+    console.error("ORDER_STATUS_ERROR:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "تغییر وضعیت سفارش ناموفق بود"
+    });
+  }
 });
 
-app.delete("/api/orders/:id", (req, res) => {
+app.delete("/api/orders/:id", async (req, res) => {
   const auth = req.headers.authorization || "";
   const adminUser = process.env.ADMIN_USER;
   const adminPassword = process.env.ADMIN_PASSWORD;
+
   if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({ success: false, message: "تنظیمات مدیر آماده نیست" });
+    return res.status(503).json({
+      success: false,
+      message: "تنظیمات مدیر آماده نیست"
+    });
   }
+
   const expected = "Basic " + Buffer.from(
     adminUser + ":" + adminPassword
   ).toString("base64");
 
   if (auth !== expected) {
-    res.set("WWW-Authenticate", "Basic realm=\"Arif App Admin\"");
+    res.set("WWW-Authenticate", 'Basic realm="Arif App Admin"');
     return res.status(401).json({
       success: false,
       message: "دسترسی غیرمجاز"
@@ -336,26 +295,36 @@ app.delete("/api/orders/:id", (req, res) => {
   }
 
   const id = Number(req.params.id);
-  const index = orders.findIndex(order => Number(order.id) === id);
-
-  if (index === -1) {
-    return res.status(404).json({
-      success: false,
-      message: "سفارش پیدا نشد"
-    });
+  if (!Number.isSafeInteger(id) || id < 1) {
+    return res.status(400).json({ success: false, message: "شماره سفارش نامعتبر است" });
   }
 
-  const deleted = orders.splice(index, 1)[0];
-  fs.writeFileSync(ORDERS_FILE, JSON.stringify(orders, null, 2), "utf8");
+  try {
+    const rows = await orderDbRequest(
+      "app_orders?id=eq." + id + "&select=id,product,price,player_id,tracking,status,created_at",
+      {
+        method: "DELETE",
+        headers: { Prefer: "return=representation" }
+      }
+    );
 
-  res.json({
-    success: true,
-    message: "سفارش حذف شد",
-    order: deleted
-  });
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(404).json({ success: false, message: "سفارش پیدا نشد" });
+    }
+
+    return res.json({
+      success: true,
+      message: "سفارش حذف شد",
+      order: orderFromDb(rows[0])
+    });
+  } catch (error) {
+    console.error("ORDER_DELETE_ERROR:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "حذف سفارش ناموفق بود"
+    });
+  }
 });
-
-
 
 app.get("/admin/login", (req, res) => {
   res.set("Cache-Control", "no-store");
@@ -572,6 +541,30 @@ app.get("/admin", async (req, res) => {
     </tr>
   `).join("");
 
+  let orders = [];
+  let ordersLoadError = "";
+  try {
+    const u = process.env.SUPABASE_URL;
+    const k = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!u || !k) {
+      ordersLoadError = "تنظیمات پایگاه داده کامل نیست";
+    } else {
+      const r = await fetch(
+        u.replace(/\/$/, "") +
+          "/rest/v1/app_orders?select=id,product,price,player_id,tracking,status,created_at&order=created_at.desc&limit=500",
+        { headers: { apikey: k, Authorization: "Bearer " + k } }
+      );
+      if (!r.ok) {
+        ordersLoadError = "خواندن سفارش‌ها از پایگاه داده ناموفق بود";
+      } else {
+        const savedOrders = await r.json();
+        orders = savedOrders.map(orderFromDb);
+      }
+    }
+  } catch (_) {
+    ordersLoadError = "اتصال به پایگاه داده سفارش‌ها برقرار نشد";
+  }
+
   const rows = orders.map(order => `
     <tr>
       <td>${escapeHtml(order.id)}</td>
@@ -661,6 +654,7 @@ ${walletRows}
 
 <h2>سفارش‌ها</h2>
 <p>تعداد سفارش‌ها: ${orders.length}</p>
+${ordersLoadError ? `<p>${escapeHtml(ordersLoadError)}</p>` : ""}
 <table>
 <tr><th>شماره</th><th>محصول</th><th>قیمت</th><th>Player ID</th><th>پیگیری</th><th>وضعیت</th><th>تاریخ</th></tr>
 ${rows}
