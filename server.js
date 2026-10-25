@@ -126,6 +126,14 @@ app.post("/api/orders", (req, res) => {
 });
 
 app.get("/api/orders", (req, res) => {
+  if (!adminAuth.isAdmin(req)) {
+    return res.status(401).json({
+      success: false,
+      message: "برای مشاهده سفارش‌ها باید مدیر وارد شده باشد"
+    });
+  }
+
+  res.set("Cache-Control", "no-store");
   res.json({
     success: true,
     count: orders.length,
