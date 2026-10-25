@@ -39,22 +39,7 @@ app.get("/api/prices", (req, res) => {
 });
 
 app.post("/api/prices", (req, res) => {
-  const auth = req.headers.authorization || "";
-  const adminUser = process.env.ADMIN_USER;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-
-  if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({
-      success: false,
-      message: "تنظیمات مدیر آماده نیست"
-    });
-  }
-
-  const expected = "Basic " + Buffer.from(
-    adminUser + ":" + adminPassword
-  ).toString("base64");
-
-  if (auth !== expected) {
+  if (!adminAuth.isAdmin(req)) {
     return res.status(401).json({
       success: false,
       message: "دسترسی غیرمجاز"
@@ -210,22 +195,7 @@ app.get("/api/orders", async (req, res) => {
 });
 
 app.patch("/api/orders/:id/status", async (req, res) => {
-  const auth = req.headers.authorization || "";
-  const adminUser = process.env.ADMIN_USER;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-
-  if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({
-      success: false,
-      message: "تنظیمات مدیر آماده نیست"
-    });
-  }
-
-  const expected = "Basic " + Buffer.from(
-    adminUser + ":" + adminPassword
-  ).toString("base64");
-
-  if (auth !== expected) {
+  if (!adminAuth.isAdmin(req)) {
     return res.status(401).json({
       success: false,
       message: "دسترسی غیرمجاز"
@@ -271,23 +241,7 @@ app.patch("/api/orders/:id/status", async (req, res) => {
 });
 
 app.delete("/api/orders/:id", async (req, res) => {
-  const auth = req.headers.authorization || "";
-  const adminUser = process.env.ADMIN_USER;
-  const adminPassword = process.env.ADMIN_PASSWORD;
-
-  if (!adminUser || !adminPassword || adminPassword === "change-me") {
-    return res.status(503).json({
-      success: false,
-      message: "تنظیمات مدیر آماده نیست"
-    });
-  }
-
-  const expected = "Basic " + Buffer.from(
-    adminUser + ":" + adminPassword
-  ).toString("base64");
-
-  if (auth !== expected) {
-    res.set("WWW-Authenticate", 'Basic realm="Arif App Admin"');
+  if (!adminAuth.isAdmin(req)) {
     return res.status(401).json({
       success: false,
       message: "دسترسی غیرمجاز"
