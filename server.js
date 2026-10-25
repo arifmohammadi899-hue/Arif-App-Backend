@@ -1413,9 +1413,20 @@ app.get("/api/awareness/posts", async (req, res) => {
     if (!r.ok) throw new Error("awareness_posts_read_failed");
 
     const rows = await r.json();
+
+    let currentUserId = null;
+    try {
+      const session = marketSession(req);
+      if (session) {
+        const currentUser = await marketUser(session.email);
+        if (currentUser) currentUserId = String(currentUser.id);
+      }
+    } catch (_) {}
+
     const posts = await Promise.all((Array.isArray(rows) ? rows : []).map(async post => ({
       id: post.id,
       user_id: post.user_id,
+      is_owner: currentUserId !== null && currentUserId === String(post.user_id),
       author: "کاربر #" + post.user_id,
       content: post.content || "",
       media_type: post.media_type || "text",
@@ -1589,6 +1600,113 @@ app.post("/api/awareness/posts", async (req, res) => {
     return res.status(503).json({
       success: false,
       message: "ثبت پست آگاهی ناموفق بود"
+    });
+  }
+});
+
+
+app.delete("/api/awareness/posts/:id", async (req, res) => {
+  try {
+    const session = marketSession(req);
+    if (!session) {
+      return res.status(401).json({
+        success: false,
+        message: "برای حذف آگاهی ابتدا وارد حساب شوید"
+      });
+    }
+
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const postId = String(req.params.id || "").trim();
+    if (!postId || postId.length > 100) {
+      return res.status(400).json({ success: false, message: "شناسه آگاهی نامعتبر است" });
+    }
+
+    const { base, key } = marketConfig();
+    const lookup = new URLSearchParams({
+      select: "id,user_id,media_path",
+      id: "eq." + postId,
+      limit: "1"
+    });
+
+    const found = await fetch(base + "/rest/v1/awareness_posts?" + lookup, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!found.ok) throw new Error("awareness_post_lookup_failed");
+
+    const rows = await found.json();
+    const post = Array.isArray(rows) ? rows[0] : null;
+
+    if (!post) {
+      return res.status(404).json({ success: false, message: "آگاهی پیدا نشد یا قبلاً حذف شده است" });
+    }
+
+    if (String(post.user_id) !== String(user.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "شما فقط می‌توانید آگاهی خودتان را حذف کنید"
+      });
+    }
+
+    const deleteQuery = new URLSearchParams({
+      id: "eq." + String(post.id),
+      user_id: "eq." + String(user.id)
+    });
+
+    const deleted = await fetch(base + "/rest/v1/awareness_posts?" + deleteQuery, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=representation"
+      }
+    });
+
+    if (!deleted.ok) {
+      const detail = await deleted.text().catch(() => "");
+      console.error("AWARENESS_DELETE_ERROR:", deleted.status, detail.slice(0, 150));
+      throw new Error("awareness_post_delete_failed");
+    }
+
+    const deletedRows = await deleted.json().catch(() => []);
+    if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "آگاهی حذف نشد؛ لطفاً دوباره تلاش کنید"
+      });
+    }
+
+    if (post.media_path) {
+      try {
+        const objectPath = String(post.media_path).split("/").map(encodeURIComponent).join("/");
+        const mediaDelete = await fetch(
+          base + "/storage/v1/object/awareness-media/" + objectPath,
+          {
+            method: "DELETE",
+            headers: { apikey: key, Authorization: "Bearer " + key }
+          }
+        );
+        if (!mediaDelete.ok) {
+          console.error("AWARENESS_MEDIA_DELETE_ERROR:", mediaDelete.status);
+        }
+      } catch (mediaError) {
+        console.error("AWARENESS_MEDIA_DELETE_ERROR:", String(mediaError.message || mediaError).slice(0, 120));
+      }
+    }
+
+    return res.json({ success: true, message: "آگاهی حذف شد" });
+  } catch (e) {
+    console.error("AWARENESS_DELETE_ERROR:", String(e.message || e).slice(0, 160));
+    return res.status(503).json({
+      success: false,
+      message: "حذف آگاهی ناموفق بود؛ لطفاً دوباره تلاش کنید"
     });
   }
 });
