@@ -2,6 +2,7 @@ require("dotenv").config();
 const express = require("express");
 
 const app = express();
+app.set("trust proxy", 1);
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin === "null") {
@@ -382,7 +383,53 @@ f.addEventListener("submit",async e=>{
 </script></html>`);
 });
 
+const ADMIN_LOGIN_ATTEMPTS = new Map();
+const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const ADMIN_LOGIN_MAX_ATTEMPTS = 5;
+
+function adminLoginKey(req) {
+  return String(req.ip || req.socket?.remoteAddress || "unknown");
+}
+
+function checkAdminLoginLimit(req, res) {
+  const key = adminLoginKey(req);
+  const now = Date.now();
+  let entry = ADMIN_LOGIN_ATTEMPTS.get(key);
+
+  if (!entry || now - entry.start >= ADMIN_LOGIN_WINDOW_MS) {
+    entry = { start: now, count: 0 };
+    ADMIN_LOGIN_ATTEMPTS.set(key, entry);
+  }
+
+  if (entry.count >= ADMIN_LOGIN_MAX_ATTEMPTS) {
+    const retryAfter = Math.max(
+      1, Math.ceil((entry.start + ADMIN_LOGIN_WINDOW_MS - now) / 1000)
+    );
+    res.set("Retry-After", String(retryAfter));
+    res.set("Cache-Control", "no-store");
+    res.status(429).json({
+      success: false,
+      message: "تلاش‌های ورود بیش از حد مجاز است؛ بعداً دوباره تلاش کنید."
+    });
+    return null;
+  }
+
+  return {
+    key,
+    fail() {
+      entry.count++;
+    },
+    success() {
+      ADMIN_LOGIN_ATTEMPTS.delete(key);
+    }
+  };
+}
+
 app.post("/admin/login", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const loginLimit = checkAdminLoginLimit(req, res);
+  if (!loginLimit) return;
+
   const expectedUser = process.env.ADMIN_USER || "";
   const expectedPass = process.env.ADMIN_PASSWORD || "";
   if (!expectedUser || !expectedPass || expectedPass === "change-me") {
@@ -395,10 +442,12 @@ app.post("/admin/login", (req, res) => {
   };
   if (!same(req.body?.username || "", expectedUser) ||
       !same(req.body?.password || "", expectedPass)) {
+    loginLimit.fail();
     return res.status(401).json({success:false,message:"نام کاربری یا رمز نادرست است"});
   }
   try {
     adminAuth.setSessionCookie(res, adminAuth.createSession(expectedUser));
+    loginLimit.success();
     return res.json({success:true});
   } catch (e) {
     console.error("ADMIN_SESSION_CONFIG_ERROR:", String(e.message || e).slice(0,100));
