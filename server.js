@@ -360,75 +360,132 @@ f.addEventListener("submit",async e=>{
 </script></html>`);
 });
 
-const ADMIN_LOGIN_ATTEMPTS = new Map();
-const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const ADMIN_LOGIN_MAX_ATTEMPTS = 5;
+
+async function adminLoginRateLimitRequest(ip, action) {
+  const base = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!base || !key) {
+    throw new Error("admin_rate_limit_database_not_configured");
+  }
+
+  const response = await fetch(
+    base.replace(/\/$/, "") + "/rest/v1/rpc/check_admin_login_attempt",
+    {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        p_ip_address: String(ip).slice(0, 100),
+        p_action: action
+      })
+    }
+  );
+
+  const raw = await response.text();
+  let data;
+
+  try {
+    data = JSON.parse(raw);
+  } catch (_) {
+    throw new Error("admin_rate_limit_invalid_response");
+  }
+
+  if (!response.ok || !Array.isArray(data) || !data[0]) {
+    console.error("ADMIN_RATE_LIMIT_DATABASE_ERROR:", response.status);
+    throw new Error("admin_rate_limit_request_failed");
+  }
+
+  return data[0];
+}
 
 function adminLoginKey(req) {
   return String(req.ip || req.socket?.remoteAddress || "unknown");
 }
 
-function checkAdminLoginLimit(req, res) {
-  const key = adminLoginKey(req);
-  const now = Date.now();
-  let entry = ADMIN_LOGIN_ATTEMPTS.get(key);
+app.post("/admin/login", async (req, res) => {
+  res.set("Cache-Control", "no-store");
 
-  if (!entry || now - entry.start >= ADMIN_LOGIN_WINDOW_MS) {
-    entry = { start: now, count: 0 };
-    ADMIN_LOGIN_ATTEMPTS.set(key, entry);
+  const ip = adminLoginKey(req);
+  let limit;
+
+  try {
+    limit = await adminLoginRateLimitRequest(ip, "check");
+  } catch (e) {
+    console.error("ADMIN_RATE_LIMIT_ERROR:", String(e.message || e).slice(0, 120));
+    return res.status(503).json({
+      success: false,
+      message: "بررسی امنیت ورود موقتاً در دسترس نیست؛ بعداً دوباره تلاش کنید."
+    });
   }
 
-  if (entry.count >= ADMIN_LOGIN_MAX_ATTEMPTS) {
+  if (!limit.allowed) {
     const retryAfter = Math.max(
-      1, Math.ceil((entry.start + ADMIN_LOGIN_WINDOW_MS - now) / 1000)
+      1,
+      Number(limit.retry_after_seconds) || 900
     );
     res.set("Retry-After", String(retryAfter));
-    res.set("Cache-Control", "no-store");
-    res.status(429).json({
+    return res.status(429).json({
       success: false,
       message: "تلاش‌های ورود بیش از حد مجاز است؛ بعداً دوباره تلاش کنید."
     });
-    return null;
   }
-
-  return {
-    key,
-    fail() {
-      entry.count++;
-    },
-    success() {
-      ADMIN_LOGIN_ATTEMPTS.delete(key);
-    }
-  };
-}
-
-app.post("/admin/login", (req, res) => {
-  res.set("Cache-Control", "no-store");
-  const loginLimit = checkAdminLoginLimit(req, res);
-  if (!loginLimit) return;
 
   const expectedUser = process.env.ADMIN_USER || "";
   const expectedPass = process.env.ADMIN_PASSWORD || "";
+
   if (!expectedUser || !expectedPass || expectedPass === "change-me") {
-    return res.status(503).json({success:false,message:"تنظیمات مدیر آماده نیست"});
+    return res.status(503).json({
+      success: false,
+      message: "تنظیمات مدیر آماده نیست"
+    });
   }
-  const same = (a,b) => {
+
+  const same = (a, b) => {
     const x = Buffer.from(String(a));
     const y = Buffer.from(String(b));
-    return x.length === y.length && require("crypto").timingSafeEqual(x,y);
+    return x.length === y.length &&
+      require("crypto").timingSafeEqual(x, y);
   };
-  if (!same(req.body?.username || "", expectedUser) ||
-      !same(req.body?.password || "", expectedPass)) {
-    loginLimit.fail();
-    return res.status(401).json({success:false,message:"نام کاربری یا رمز نادرست است"});
+
+  if (
+    !same(req.body?.username || "", expectedUser) ||
+    !same(req.body?.password || "", expectedPass)
+  ) {
+    try {
+      await adminLoginRateLimitRequest(ip, "fail");
+    } catch (e) {
+      console.error("ADMIN_RATE_LIMIT_FAIL_ERROR:", String(e.message || e).slice(0, 120));
+      return res.status(503).json({
+        success: false,
+        message: "ثبت تلاش ورود انجام نشد؛ لطفاً دوباره تلاش کنید."
+      });
+    }
+
+    return res.status(401).json({
+      success: false,
+      message: "نام کاربری یا رمز نادرست است"
+    });
   }
+
   try {
-    adminAuth.setSessionCookie(res, adminAuth.createSession(expectedUser));
-    loginLimit.success();
-    return res.json({success:true});
+    await adminLoginRateLimitRequest(ip, "success");
+
+    adminAuth.setSessionCookie(
+      res,
+      adminAuth.createSession(expectedUser)
+    );
+
+    return res.json({ success: true });
   } catch (e) {
-    console.error("ADMIN_SESSION_CONFIG_ERROR:", String(e.message || e).slice(0,100));
-    return res.status(503).json({success:false,message:"تنظیم نشست مدیر در سرور کامل نیست"});
+    console.error("ADMIN_SESSION_OR_RATE_LIMIT_ERROR:", String(e.message || e).slice(0, 120));
+    return res.status(503).json({
+      success: false,
+      message: "ورود مدیر موقتاً انجام نشد؛ دوباره تلاش کنید."
+    });
   }
 });
 
