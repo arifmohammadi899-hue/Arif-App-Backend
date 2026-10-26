@@ -675,6 +675,21 @@ ${ordersLoadError ? `<p>${escapeHtml(ordersLoadError)}</p>` : ""}
 <tr><th>شماره</th><th>محصول</th><th>قیمت</th><th>Player ID</th><th>پیگیری</th><th>وضعیت</th><th>تاریخ</th></tr>
 ${rows}
 </table>
+<h2>مشاهده پیام‌های کاربران</h2>
+<p>این بخش فقط برای مدیر واردشده قابل دسترسی است.</p>
+<button type="button" id="admin-chat-load">بارگذاری گفت‌وگوها</button>
+<p id="admin-chat-status" role="status"></p>
+<div id="admin-chat-list"></div>
+<h3>پیام‌های گفت‌وگوی انتخاب‌شده</h3>
+<div id="admin-chat-messages"></div>
+
+<h2>سفارش‌ها</h2>
+<p>تعداد سفارش‌ها: ${orders.length}</p>
+${ordersLoadError ? `<p>${escapeHtml(ordersLoadError)}</p>` : ""}
+<table>
+<tr><th>شماره</th><th>محصول</th><th>قیمت</th><th>Player ID</th><th>پیگیری</th><th>وضعیت</th><th>تاریخ</th></tr>
+${rows}
+</table>
 <script>
 
 document.querySelectorAll(".wallet-review").forEach(button => {
@@ -785,6 +800,105 @@ document.querySelectorAll(".balance-form").forEach(form => {
     }
   });
 });
+const adminChatStatus = document.getElementById("admin-chat-status");
+const adminChatList = document.getElementById("admin-chat-list");
+const adminChatMessages = document.getElementById("admin-chat-messages");
+
+function adminChatText(tag, value) {
+  const el = document.createElement(tag);
+  el.textContent = value == null ? "" : String(value);
+  return el;
+}
+
+document.getElementById("admin-chat-load").addEventListener("click", async function () {
+  adminChatStatus.textContent = "در حال دریافت گفت‌وگوها...";
+  adminChatList.replaceChildren();
+  adminChatMessages.replaceChildren();
+
+  try {
+    const response = await fetch("/admin/api/chat/conversations", {
+      credentials: "same-origin",
+      cache: "no-store"
+    });
+    const body = await response.json();
+    if (!response.ok || !body.success) {
+      throw new Error(body.message || "دریافت گفت‌وگوها ناموفق بود");
+    }
+
+    if (!body.conversations.length) {
+      adminChatStatus.textContent = "گفت‌وگویی پیدا نشد.";
+      return;
+    }
+
+    body.conversations.forEach(function (c) {
+      const box = document.createElement("div");
+      box.style.cssText = "border:1px solid #777;padding:10px;margin:8px 0";
+      box.appendChild(adminChatText("p",
+        "گفت‌وگو #" + c.id + " — " +
+        (c.user_one_email || ("کاربر " + c.user_one_id)) + " ↔ " +
+        (c.user_two_email || ("کاربر " + c.user_two_id))
+      ));
+      box.appendChild(adminChatText("small",
+        "آخرین فعالیت: " + (c.last_message_at || c.created_at || "نامشخص")
+      ));
+
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = "نمایش پیام‌ها";
+      button.addEventListener("click", async function () {
+        adminChatMessages.replaceChildren();
+        adminChatStatus.textContent = "در حال دریافت پیام‌ها...";
+        try {
+          const r = await fetch(
+            "/admin/api/chat/conversations/" + encodeURIComponent(c.id) + "/messages",
+            { credentials: "same-origin", cache: "no-store" }
+          );
+          const data = await r.json();
+          if (!r.ok || !data.success) {
+            throw new Error(data.message || "دریافت پیام‌ها ناموفق بود");
+          }
+
+          if (!data.messages.length) {
+            adminChatStatus.textContent = "این گفت‌وگو پیامی ندارد.";
+            return;
+          }
+
+          data.messages.forEach(function (m) {
+            const item = document.createElement("div");
+            item.style.cssText = "border-bottom:1px solid #aaa;padding:8px;margin:4px 0";
+            item.appendChild(adminChatText("p",
+              (m.sender_email || ("کاربر " + m.sender_id)) + " — " +
+              (m.created_at || "") + " — " + (m.message_type || "text")
+            ));
+            if (m.message_text) item.appendChild(adminChatText("p", m.message_text));
+
+            if (m.image_url) {
+              const link = document.createElement("a");
+              link.href = m.image_url;
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+              link.textContent = "مشاهده تصویر خصوصی";
+              item.appendChild(link);
+            }
+            adminChatMessages.appendChild(item);
+          });
+          adminChatStatus.textContent = "پیام‌ها بارگذاری شدند.";
+        } catch (e) {
+          adminChatStatus.textContent = e.message || "خطا در دریافت پیام‌ها";
+        }
+      });
+
+      box.appendChild(button);
+      adminChatList.appendChild(box);
+    });
+
+    adminChatStatus.textContent =
+      "تعداد گفت‌وگوهای بارگذاری‌شده: " + body.conversations.length;
+  } catch (e) {
+    adminChatStatus.textContent = e.message || "خطا در دریافت گفت‌وگوها";
+  }
+});
+
 </script>
 </body>
 </html>`);
@@ -1795,6 +1909,147 @@ app.get("/api/app-version", (req, res) => {
     releaseNotes: process.env.APP_RELEASE_NOTES || "نسخه 1.4: افزودن سیستم بررسی خودکار نسخه جدید و بهبود برنامه."
   });
 });
+
+/* ADMIN_CHAT_VIEW_API */
+app.get("/admin/api/chat/conversations", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!adminAuth.isAdmin(req)) {
+    return res.status(401).json({ success: false, message: "دسترسی مدیر لازم است" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const q = new URLSearchParams({
+      select: "id,user_one_id,user_two_id,created_at,last_message_at",
+      order: "last_message_at.desc.nullslast",
+      limit: "100"
+    });
+    const r = await fetch(base + "/rest/v1/chat_conversations?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!r.ok) throw new Error("chat_conversations_read_failed");
+
+    const conversations = await r.json();
+    const rows = Array.isArray(conversations) ? conversations : [];
+    const ids = [...new Set(rows.flatMap(c => [
+      String(c.user_one_id), String(c.user_two_id)
+    ]).filter(x => /^[0-9]+$/.test(x)))];
+
+    let users = [];
+    if (ids.length) {
+      const uq = new URLSearchParams({
+        select: "id,email",
+        id: "in.(" + ids.join(",") + ")"
+      });
+      const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      });
+      if (!ur.ok) throw new Error("chat_users_read_failed");
+      users = await ur.json();
+    }
+
+    const emailById = new Map((Array.isArray(users) ? users : [])
+      .map(u => [String(u.id), String(u.email || "")]));
+
+    return res.json({
+      success: true,
+      conversations: rows.map(c => ({
+        id: c.id,
+        user_one_id: c.user_one_id,
+        user_two_id: c.user_two_id,
+        user_one_email: emailById.get(String(c.user_one_id)) || "",
+        user_two_email: emailById.get(String(c.user_two_id)) || "",
+        created_at: c.created_at,
+        last_message_at: c.last_message_at
+      }))
+    });
+  } catch (e) {
+    console.error("ADMIN_CHAT_LIST_ERROR:", String(e.message || e).slice(0, 120));
+    return res.status(503).json({
+      success: false, message: "دریافت فهرست گفت‌وگوها ناموفق بود"
+    });
+  }
+});
+
+app.get("/admin/api/chat/conversations/:id/messages", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!adminAuth.isAdmin(req)) {
+    return res.status(401).json({ success: false, message: "دسترسی مدیر لازم است" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const cq = new URLSearchParams({
+      select: "id,user_one_id,user_two_id",
+      id: "eq." + conversationId,
+      limit: "1"
+    });
+    const cr = await fetch(base + "/rest/v1/chat_conversations?" + cq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!cr.ok) throw new Error("chat_conversation_lookup_failed");
+    const conversations = await cr.json();
+    if (!Array.isArray(conversations) || !conversations.length) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const mq = new URLSearchParams({
+      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at",
+      conversation_id: "eq." + conversationId,
+      order: "created_at.asc",
+      limit: "500"
+    });
+    const mr = await fetch(base + "/rest/v1/chat_messages?" + mq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!mr.ok) throw new Error("chat_messages_read_failed");
+
+    const messages = await mr.json();
+    const rows = Array.isArray(messages) ? messages : [];
+    const senderIds = [...new Set(rows.map(m => String(m.sender_id))
+      .filter(x => /^[0-9]+$/.test(x)))];
+
+    let users = [];
+    if (senderIds.length) {
+      const uq = new URLSearchParams({
+        select: "id,email",
+        id: "in.(" + senderIds.join(",") + ")"
+      });
+      const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      });
+      if (!ur.ok) throw new Error("chat_users_read_failed");
+      users = await ur.json();
+    }
+
+    const emailById = new Map((Array.isArray(users) ? users : [])
+      .map(u => [String(u.id), String(u.email || "")]));
+
+    const result = await Promise.all(rows.map(async m => ({
+      id: m.id,
+      sender_id: m.sender_id,
+      sender_email: emailById.get(String(m.sender_id)) || "",
+      message_type: m.message_type,
+      message_text: m.message_text,
+      image_url: m.message_type === "image"
+        ? await arifChatSignedImage(m.image_path) : null,
+      created_at: m.created_at
+    })));
+
+    return res.json({ success: true, messages: result });
+  } catch (e) {
+    console.error("ADMIN_CHAT_MESSAGES_ERROR:", String(e.message || e).slice(0, 120));
+    return res.status(503).json({
+      success: false, message: "دریافت پیام‌ها ناموفق بود"
+    });
+  }
+});
+/* END ADMIN_CHAT_VIEW_API */
 
 const PORT = process.env.PORT || 10000;
 
