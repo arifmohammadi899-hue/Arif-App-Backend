@@ -1584,7 +1584,7 @@ app.get("/api/awareness/posts", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const q = new URLSearchParams({
-      select: "id,user_id,content,media_type,media_path,created_at",
+      select: "id,user_id,content,media_type,media_path,created_at,price,price_currency",
       order: "created_at.desc",
       limit: "100"
     });
@@ -1612,10 +1612,15 @@ app.get("/api/awareness/posts", async (req, res) => {
       content: post.content || "",
       media_type: post.media_type || "text",
       media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
+      price: post.price == null ? null : Number(post.price),
+      price_currency: post.price_currency || null,
       created_at: post.created_at
     })));
 
-    return res.json({ success: true, posts });
+    return res.json({
+      success: true,
+      posts
+    });
   } catch (e) {
     console.error("AWARENESS_LIST_ERROR:", String(e.message || e).slice(0, 150));
     return res.status(503).json({
@@ -1647,6 +1652,26 @@ app.post("/api/awareness/posts", async (req, res) => {
 
     const content = String(req.body.content || "").trim();
     const dataUrl = String(req.body.media_data || "");
+    const rawPrice = req.body.price;
+    const priceCurrency = String(req.body.price_currency || "").trim().toUpperCase();
+    let price = null;
+
+    if (rawPrice !== undefined && rawPrice !== null && String(rawPrice).trim() !== "") {
+      price = Number(rawPrice);
+      if (!Number.isFinite(price) || price <= 0 || price > 999999999999) {
+        return res.status(400).json({
+          success: false,
+          message: "قیمت باید عددی بزرگ‌تر از صفر باشد"
+        });
+      }
+      if (!["AFN", "TOMAN"].includes(priceCurrency)) {
+        return res.status(400).json({
+          success: false,
+          message: "واحد قیمت را افغانی یا تومان انتخاب کنید"
+        });
+      }
+    }
+
     let mediaType = "text";
     let mediaPath = null;
     let mediaBuffer = null;
@@ -1739,7 +1764,9 @@ app.post("/api/awareness/posts", async (req, res) => {
         user_id: user.id,
         content,
         media_type: mediaType,
-        media_path: mediaPath
+        media_path: mediaPath,
+        price,
+        price_currency: price === null ? null : priceCurrency
       }])
     });
 
@@ -1773,8 +1800,10 @@ app.post("/api/awareness/posts", async (req, res) => {
         content: post.content || "",
         media_type: post.media_type || "text",
         media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
+        price: post.price == null ? null : Number(post.price),
+        price_currency: post.price_currency || null,
         created_at: post.created_at
-      } : null
+      } : null,
     });
   } catch (e) {
     console.error("AWARENESS_CREATE_ERROR:", String(e.message || e).slice(0, 180));
