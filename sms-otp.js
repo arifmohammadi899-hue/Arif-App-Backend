@@ -85,12 +85,33 @@ module.exports = function (app) {
       }
 
       const data = result.data || {};
+      const warning = data.warning || {};
+
+      if (warning.code === "SMS_PERMISSION_MISSING") {
+        console.error("TEXTBEE_SMS_WARNING:", warning.code);
+        return res.status(502).json({
+          success: false,
+          message: "مجوز پیامک TextBee مشکل دارد؛ وضعیت مجوز برنامه TextBee را بررسی کنید"
+        });
+      }
+
       const accepted =
         data.success === true ||
         (typeof data.successCount === "number" &&
          data.successCount > 0);
 
-      if (!response.ok || !accepted) {
+      console.log("TEXTBEE_SMS_RESULT:", JSON.stringify({
+        httpStatus: response.status,
+        success: data.success,
+        successCount: data.successCount,
+        failureCount: data.failureCount,
+        warning: warning.code || null,
+        smsBatchId: data.smsBatchId || null
+      }));
+
+      if (!response.ok || !accepted ||
+          (typeof data.successCount === "number" &&
+           data.successCount === 0)) {
         console.error("TEXTBEE_ERROR:", response.status,
           JSON.stringify(result).slice(0, 300));
         return res.status(502).json({
