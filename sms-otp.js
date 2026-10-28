@@ -1,19 +1,29 @@
 const crypto = require("crypto");
+const { smsVerified } = require("./auth-state");
 
 module.exports = function (app) {
   const codes = new Map();
   const requests = new Map();
   const attempts = new Map();
 
+  function normalizePhone(value) {
+    return String(value || "").replace(/[\s()-]/g, "");
+  }
+
+  function validEmail(value) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  }
+
   app.post("/api/auth/request-sms-otp", async (req, res) => {
     try {
-      const phone = String(req.body.phone || "").replace(/[\s()-]/g, "");
+      const email = String(req.body.email || "").trim().toLowerCase();
+      const phone = normalizePhone(req.body.phone);
       const number = phone.replace(/^\+/, "");
 
-      if (!/^\d{8,15}$/.test(number)) {
+      if (!validEmail(email) || !/^\d{8,15}$/.test(number)) {
         return res.status(400).json({
           success: false,
-          message: "شماره تلفن بین‌المللی معتبر وارد کنید"
+          message: "ایمیل و شماره تلفن معتبر وارد کنید"
         });
       }
 
@@ -27,8 +37,8 @@ module.exports = function (app) {
       }
 
       const now = Date.now();
-      const ip = req.ip || "unknown";
-      const last = requests.get(number);
+      const key = email + "|" + number;
+      const last = requests.get(key);
 
       if (last && now - last < 60000) {
         return res.status(429).json({
@@ -37,7 +47,9 @@ module.exports = function (app) {
         });
       }
 
+      const ip = req.ip || "unknown";
       const ipEntry = requests.get("ip:" + ip);
+
       if (ipEntry && now - ipEntry.time < 3600000 &&
           ipEntry.count >= 10) {
         return res.status(429).json({
@@ -47,6 +59,7 @@ module.exports = function (app) {
       }
 
       const code = String(crypto.randomInt(100000, 1000000));
+
       const response = await fetch("https://api.smspm.com", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -62,31 +75,43 @@ module.exports = function (app) {
 
       const raw = await response.text();
       let result;
-      try { result = JSON.parse(raw); } catch { result = { responseText: raw.slice(0, 500) }; }
-      if (!response.ok || result.error || !Array.isArray(result.messages) || !result.messages.length) {
-        console.error("SMSPM_ERROR", JSON.stringify({ status: response.status, error: String(result.error || result.message || result.responseText || "Unrecognized SMSPM response").slice(0, 200) }));
-        return res.status(502).json({ success: false, message: "ارسال پیامک تأیید نشد" });
+      try {
+        result = JSON.parse(raw);
+      } catch {
+        result = { responseText: raw.slice(0, 300) };
       }
 
-      codes.set(number, {
+      if (!response.ok || result.error ||
+          !Array.isArray(result.messages) || !result.messages.length) {
+        console.error("SMSPM_ERROR:", response.status);
+        return res.status(502).json({
+          success: false,
+          message: "ارسال پیامک تأیید نشد"
+        });
+      }
+
+      codes.set(key, {
         hash: crypto.createHash("sha256").update(code).digest("hex"),
+        email,
+        number,
         expires: now + 300000,
         tries: 0
       });
 
-      requests.set(number, now);
-      const entry = requests.get("ip:" + ip);
+      requests.set(key, now);
       requests.set("ip:" + ip, {
-        time: entry && now - entry.time < 3600000 ? entry.time : now,
-        count: entry && now - entry.time < 3600000
-          ? entry.count + 1 : 1
+        time: ipEntry && now - ipEntry.time < 3600000
+          ? ipEntry.time : now,
+        count: ipEntry && now - ipEntry.time < 3600000
+          ? ipEntry.count + 1 : 1
       });
 
       return res.json({
         success: true,
-        message: "درخواست ارسال کد ثبت شد"
+        message: "کد پیامک ارسال شد"
       });
-    } catch (_) {
+    } catch (err) {
+      console.error("SMS_OTP_ERROR:", String(err.message || err).slice(0, 150));
       return res.status(502).json({
         success: false,
         message: "ارتباط با سرویس پیامک ناموفق بود"
@@ -95,17 +120,19 @@ module.exports = function (app) {
   });
 
   app.post("/api/auth/verify-sms-otp", (req, res) => {
-    const phone = String(req.body.phone || "").replace(/[\s()-]/g, "");
+    const email = String(req.body.email || "").trim().toLowerCase();
+    const phone = normalizePhone(req.body.phone);
     const number = phone.replace(/^\+/, "");
     const code = String(req.body.code || "");
-    const entry = codes.get(number);
+    const key = email + "|" + number;
+    const entry = codes.get(key);
 
-    if (!/^\d{8,15}$/.test(number) || !entry ||
-        entry.expires < Date.now() || entry.tries >= 5) {
-      codes.delete(number);
+    if (!validEmail(email) || !/^\d{8,15}$/.test(number) ||
+        !entry || entry.expires < Date.now() || entry.tries >= 5) {
+      codes.delete(key);
       return res.status(400).json({
         success: false,
-        message: "کد نامعتبر یا منقضی شده است"
+        message: "کد پیامک نامعتبر یا منقضی شده است"
       });
     }
 
@@ -118,11 +145,13 @@ module.exports = function (app) {
         !crypto.timingSafeEqual(supplied, expected)) {
       return res.status(400).json({
         success: false,
-        message: "کد تأیید اشتباه است"
+        message: "کد پیامک اشتباه است"
       });
     }
 
-    codes.delete(number);
+    codes.delete(key);
+    smsVerified.set(key, Date.now() + 10 * 60 * 1000);
+
     return res.json({
       success: true,
       verified: true,

@@ -1050,7 +1050,7 @@ app.get("/api/marketplace/ads", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const q = new URLSearchParams({
-      select: "id,user_id,category,title,price,description,phone,photos,video_url,seller,created_at",
+      select: "id,user_id,category,title,price,currency,description,phone,photos,video_url,seller,created_at",
       order: "created_at.desc",
       limit: "100"
     });
@@ -1092,6 +1092,7 @@ app.post("/api/marketplace/ads", async (req, res) => {
   const category = String(req.body.category || "").trim().slice(0, 80);
   const title = String(req.body.title || "").trim();
   const price = Number(req.body.price);
+  const currency = String(req.body.currency || "AFN").trim().toUpperCase();
   const description = String(req.body.description || "").trim().slice(0, 5000);
   const phone = String(req.body.phone || "").trim().slice(0, 25);
   const photos = Array.isArray(req.body.photos) ? req.body.photos : [];
@@ -1100,6 +1101,9 @@ app.post("/api/marketplace/ads", async (req, res) => {
   if (!category || !title || title.length > 120 ||
       !Number.isSafeInteger(price) || price < 0 || price > 9000000000000000) {
     return res.status(400).json({ success: false, message: "دسته‌بندی، عنوان یا قیمت معتبر نیست" });
+  }
+  if (!["AFN", "IRR"].includes(currency)) {
+    return res.status(400).json({ success: false, message: "واحد پول معتبر نیست" });
   }
   if (photos.length > 3) {
     return res.status(400).json({ success: false, message: "حداکثر ۳ عکس انتخاب کنید" });
@@ -1143,6 +1147,7 @@ app.post("/api/marketplace/ads", async (req, res) => {
         category,
         title,
         price,
+        currency,
         description,
         phone,
         photos: storedPhotos,
@@ -1925,6 +1930,7 @@ app.delete("/api/awareness/posts/:id", async (req, res) => {
 
 
 require("./otp")(app);
+require("./sms-otp")(app);
 // SMS OTP disabled
 
 app.get("/api/app-version", (req, res) => {

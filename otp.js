@@ -29,6 +29,8 @@ function readSession(token, secret) {
   }
 }
 
+const { smsVerified, emailVerified } = require("./auth-state");
+
 module.exports = function (app) {
   const codes = new Map();
   const requests = new Map();
@@ -45,6 +47,15 @@ module.exports = function (app) {
       }
       if (!/^\d{8,15}$/.test(number)) {
         return res.status(400).json({ success: false, message: "شماره تلفن بین‌المللی معتبر وارد کنید" });
+      }
+      const smsKey = email + "|" + number;
+      const smsExpiry = smsVerified.get(smsKey);
+      if (!smsExpiry || smsExpiry < Date.now()) {
+        smsVerified.delete(smsKey);
+        return res.status(403).json({
+          success: false,
+          message: "ابتدا کد پیامک شماره تلفن را تأیید کنید"
+        });
       }
       if (!process.env.RESEND_API_KEY) {
         return res.status(503).json({ success: false, message: "کلید سرویس ایمیل تنظیم نشده است" });
@@ -107,12 +118,32 @@ module.exports = function (app) {
     const email = String(req.body.email || "").trim().toLowerCase();
     const phone = String(req.body.phone || "").replace(/[\s()-]/g, "").replace(/^\+/, "");
     const code = String(req.body.code || "");
+    const firstName = String(req.body.first_name || "").trim().slice(0, 100);
+    const surname = String(req.body.surname || "").trim().slice(0, 100);
+    const username = String(req.body.username || "").trim().slice(0, 50);
+    const country = String(req.body.country || "").trim().slice(0, 100);
+    const dialCode = String(req.body.dial_code || "").trim();
     const entry = codes.get(email);
+
+    const smsKey = email + "|" + phone;
+    const smsExpiry = smsVerified.get(smsKey);
+    if (!smsExpiry || smsExpiry < Date.now()) {
+      smsVerified.delete(smsKey);
+      return res.status(403).json({
+        success: false,
+        message: "تأیید پیامک منقضی شده است؛ شماره را دوباره تأیید کنید"
+      });
+    }
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
         !/^\d{8,15}$/.test(phone) ||
-        !entry || entry.phone !== phone ||
-        entry.expires < Date.now() || entry.tries >= 5) {
+        !firstName || !surname || username.length < 3 ||
+        !country || !/^\+\d{1,4}$/.test(dialCode) ||
+        !entry || entry.phone !== phone) {
+      return res.status(400).json({ success: false, message: "کد نامعتبر یا منقضی شده است" });
+    }
+
+    if (entry.expires < Date.now() || entry.tries >= 5) {
       codes.delete(email);
       return res.status(400).json({ success: false, message: "کد نامعتبر یا منقضی شده است" });
     }
@@ -141,9 +172,19 @@ module.exports = function (app) {
           "apikey": supabaseKey,
           "Authorization": "Bearer " + supabaseKey,
           "Content-Type": "application/json",
-          "Prefer": "resolution=ignore-duplicates,return=minimal"
+          "Prefer": "resolution=merge-duplicates,return=minimal"
         },
-        body: JSON.stringify({ email })
+        body: JSON.stringify({
+          email,
+          phone: "+" + phone,
+          first_name: firstName,
+          surname,
+          username,
+          country,
+          dial_code: dialCode,
+          phone_verified: true,
+          email_verified: true
+        })
       });
       if (!saved.ok) {
         console.error("SUPABASE_USER_SAVE_ERROR:", saved.status);
