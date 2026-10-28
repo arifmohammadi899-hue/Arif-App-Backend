@@ -27,12 +27,11 @@ module.exports = function (app) {
         });
       }
 
-      if (!process.env.SMSPM_HASH ||
-          !process.env.SMSPM_TOKEN ||
-          !process.env.SMSPM_SENDER) {
+      if (!process.env.TEXTBEE_API_KEY ||
+          !process.env.TEXTBEE_DEVICE_ID) {
         return res.status(503).json({
           success: false,
-          message: "سرویس پیامک هنوز تنظیم نشده است"
+          message: "سرویس TextBee هنوز تنظیم نشده است"
         });
       }
 
@@ -60,30 +59,40 @@ module.exports = function (app) {
 
       const code = String(crypto.randomInt(100000, 1000000));
 
-      const response = await fetch("https://api.smspm.com", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: AbortSignal.timeout(10000),
-        body: JSON.stringify({
-          hash: process.env.SMSPM_HASH,
-          token: process.env.SMSPM_TOKEN,
-          toNumber: number,
-          fromNumber: process.env.SMSPM_SENDER,
-          text: "ARIF APP verification code: " + code
-        })
-      });
+      const response = await fetch(
+        "https://api.textbee.dev/api/v1/gateway/send-sms",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": process.env.TEXTBEE_API_KEY
+          },
+          signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({
+            deviceId: process.env.TEXTBEE_DEVICE_ID,
+            recipients: ["+" + number],
+            message: "ARIF APP verification code: " + code
+          })
+        }
+      );
 
       const raw = await response.text();
       let result;
       try {
         result = JSON.parse(raw);
       } catch {
-        result = { responseText: raw.slice(0, 300) };
+        result = {};
       }
 
-      if (!response.ok || result.error ||
-          !Array.isArray(result.messages) || !result.messages.length) {
-        console.error("SMSPM_ERROR:", response.status);
+      const data = result.data || {};
+      const accepted =
+        data.success === true ||
+        (typeof data.successCount === "number" &&
+         data.successCount > 0);
+
+      if (!response.ok || !accepted) {
+        console.error("TEXTBEE_ERROR:", response.status,
+          JSON.stringify(result).slice(0, 300));
         return res.status(502).json({
           success: false,
           message: "ارسال پیامک تأیید نشد"
