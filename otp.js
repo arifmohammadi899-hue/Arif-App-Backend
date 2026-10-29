@@ -57,7 +57,7 @@ module.exports = function (app) {
           message: "ابتدا کد پیامک شماره تلفن را تأیید کنید"
         });
       }
-      if (!process.env.RESEND_API_KEY) {
+      if (!process.env.SENDLIBERTY_API_KEY) {
         return res.status(503).json({ success: false, message: "کلید سرویس ایمیل تنظیم نشده است" });
       }
 
@@ -80,25 +80,28 @@ module.exports = function (app) {
       });
 
       const code = String(crypto.randomInt(100000, 1000000));
-      const response = await fetch("https://api.resend.com/emails", {
-          method: "POST",
-          headers: {
-            "Authorization": "Bearer " + process.env.RESEND_API_KEY,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            from: "ARIF APP <onboarding@resend.dev>",
-            to: [email],
-            subject: "کد تأیید ARIF APP",
-            text: `کد تأیید شما: ${code}\nاین کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.`,
-            html: `<div dir="rtl" style="font-family:Arial,sans-serif"><h2>کد تأیید ARIF APP</h2><p>کد شما:</p><h1 style="letter-spacing:6px">${code}</h1><p>این کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.</p></div>`
-          })
-        });
-        if (!response.ok) {
-          const detail = await response.text();
-          console.error("RESEND_EMAIL_ERROR:", response.status, detail.slice(0, 300));
-          throw new Error("Resend API request failed: " + response.status);
-        }
+      const response = await fetch("https://sendliberty.com/api/send", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + process.env.SENDLIBERTY_API_KEY,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: "ARIF APP <arifmohammadi899@gmail.com>",
+          to: email,
+          subject: "کد تأیید ARIF APP",
+          text: `کد تأیید شما: ${code}
+این کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.`,
+          html: `<div dir="rtl" style="font-family:Arial,sans-serif"><h2>کد تأیید ARIF APP</h2><p>کد شما:</p><h1 style="letter-spacing:6px">${code}</h1><p>این کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.</p></div>`
+        })
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        console.error("SENDLIBERTY_EMAIL_ERROR:", response.status, detail.slice(0, 300));
+        throw new Error("Sendliberty API request failed: " + response.status);
+      }
+
 
       codes.set(email, {
         hash: crypto.createHash("sha256").update(code).digest("hex"),
