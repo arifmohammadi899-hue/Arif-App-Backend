@@ -27,12 +27,11 @@ module.exports = function (app) {
         });
       }
 
-      if (!process.env.SMSPM_HASH ||
-          !process.env.SMSPM_API_TOKEN ||
-          !process.env.SMSPM_FROM_NUMBER) {
+      if (!process.env.SEMY_SMS_TOKEN ||
+          !process.env.SEMY_SMS_DEVICE_ID) {
         return res.status(503).json({
           success: false,
-          message: "تنظیمات سرویس پیامک کامل نیست"
+          message: "تنظیمات SemySMS کامل نیست"
         });
       }
 
@@ -60,48 +59,49 @@ module.exports = function (app) {
 
       const code = String(crypto.randomInt(100000, 1000000));
 
-      const response = await fetch("https://api.smspm.com", {
+      const response = await fetch("https://semysms.net/api/3/sms.php", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
         signal: AbortSignal.timeout(15000),
-        body: JSON.stringify({
-          hash: process.env.SMSPM_HASH,
-          token: process.env.SMSPM_API_TOKEN,
-          toNumber: number,
-          text: "ARIF APP verification code: " + code,
-          fromNumber: process.env.SMSPM_FROM_NUMBER
+        body: new URLSearchParams({
+          token: process.env.SEMY_SMS_TOKEN,
+          device: process.env.SEMY_SMS_DEVICE_ID,
+          phone: "+" + number,
+          msg: "ARIF APP verification code: " + code
         })
       });
 
       const raw = await response.text();
       let result;
-
       try {
         result = JSON.parse(raw);
       } catch {
         result = {};
       }
 
-      const firstMessage =
-        Array.isArray(result.messages) ? result.messages[0] : null;
+      const accepted =
+        response.ok &&
+        String(result.code) === "0" &&
+        result.id !== undefined &&
+        result.id !== null;
 
-      const messageId = firstMessage?.id || result.messageId || null;
-      const accepted = response.ok && !result.error && !!messageId;
-
-      console.log("SMSPM_RESULT:", JSON.stringify({
+      console.log("SEMY_SMS_RESULT:", JSON.stringify({
         httpStatus: response.status,
         accepted,
-        providerStatus: firstMessage?.status || result.status || null,
-        messageId
+        providerCode: result.code ?? null,
+        messageId: result.id ?? null
       }));
 
       if (!accepted) {
-        console.error("SMSPM_ERROR:", response.status,
-          String(result.error || "SMS request not accepted").slice(0, 200));
+        console.error("SEMY_SMS_ERROR:", response.status,
+          String(result.error || result.message ||
+            ("SemySMS code " + (result.code ?? "unknown"))).slice(0, 200));
 
         return res.status(502).json({
           success: false,
-          message: "ارسال پیامک تأیید نشد؛ تنظیمات سرویس را بررسی کنید"
+          message: "ارسال پیامک تأیید نشد؛ وضعیت SemySMS را بررسی کنید"
         });
       }
 
