@@ -27,11 +27,11 @@ module.exports = function (app) {
         });
       }
 
-      if (!process.env.SEMY_SMS_TOKEN ||
-          !process.env.SEMY_SMS_DEVICE_ID) {
+      if (!process.env.TEXTBEE_API_KEY ||
+          !process.env.TEXTBEE_DEVICE_ID) {
         return res.status(503).json({
           success: false,
-          message: "تنظیمات SemySMS کامل نیست"
+          message: "سرویس TextBee هنوز تنظیم نشده است"
         });
       }
 
@@ -59,19 +59,22 @@ module.exports = function (app) {
 
       const code = String(crypto.randomInt(100000, 1000000));
 
-      const response = await fetch("https://semysms.net/api/3/sms.php", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        signal: AbortSignal.timeout(15000),
-        body: new URLSearchParams({
-          token: process.env.SEMY_SMS_TOKEN,
-          device: process.env.SEMY_SMS_DEVICE_ID,
-          phone: "+" + number,
-          msg: "ARIF APP verification code: " + code
-        })
-      });
+      const response = await fetch(
+        "https://api.textbee.dev/api/v1/gateway/send-sms",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": process.env.TEXTBEE_API_KEY
+          },
+          signal: AbortSignal.timeout(15000),
+          body: JSON.stringify({
+            deviceId: process.env.TEXTBEE_DEVICE_ID,
+            recipients: ["+" + number],
+            message: "ARIF APP verification code: " + code
+          })
+        }
+      );
 
       const raw = await response.text();
       let result;
@@ -81,29 +84,39 @@ module.exports = function (app) {
         result = {};
       }
 
-      const accepted =
-        response.ok &&
-        String(result.code) === "0" &&
-        result.id !== undefined &&
-        result.id !== null;
+      const data = result.data || {};
+      const warning = data.warning || {};
 
-      console.log("SEMY_SMS_RESULT:", JSON.stringify({
-        httpStatus: response.status,
-        accepted,
-        providerCode: result.code ?? null,
-        messageId: result.id ?? null,
-        phonePrefix: "+" + number.slice(0, Math.max(0, number.length - 4)),
-        phoneLast4: number.slice(-4)
-      }));
-
-      if (!accepted) {
-        console.error("SEMY_SMS_ERROR:", response.status,
-          String(result.error || result.message ||
-            ("SemySMS code " + (result.code ?? "unknown"))).slice(0, 200));
-
+      if (warning.code === "SMS_PERMISSION_MISSING") {
+        console.error("TEXTBEE_SMS_WARNING:", warning.code);
         return res.status(502).json({
           success: false,
-          message: "ارسال پیامک تأیید نشد؛ وضعیت SemySMS را بررسی کنید"
+          message: "مجوز پیامک TextBee مشکل دارد؛ وضعیت مجوز برنامه TextBee را بررسی کنید"
+        });
+      }
+
+      const accepted =
+        data.success === true ||
+        (typeof data.successCount === "number" &&
+         data.successCount > 0);
+
+      console.log("TEXTBEE_SMS_RESULT:", JSON.stringify({
+        httpStatus: response.status,
+        success: data.success,
+        successCount: data.successCount,
+        failureCount: data.failureCount,
+        warning: warning.code || null,
+        smsBatchId: data.smsBatchId || null
+      }));
+
+      if (!response.ok || !accepted ||
+          (typeof data.successCount === "number" &&
+           data.successCount === 0)) {
+        console.error("TEXTBEE_ERROR:", response.status,
+          JSON.stringify(result).slice(0, 300));
+        return res.status(502).json({
+          success: false,
+          message: "ارسال پیامک تأیید نشد"
         });
       }
 
