@@ -91,7 +91,9 @@ module.exports = function (app) {
         httpStatus: response.status,
         accepted,
         providerCode: result.code ?? null,
-        messageId: result.id ?? null
+        messageId: result.id ?? null,
+        phonePrefix: "+" + number.slice(0, Math.max(0, number.length - 4)),
+        phoneLast4: number.slice(-4)
       }));
 
       if (!accepted) {
