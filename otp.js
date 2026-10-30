@@ -1,5 +1,4 @@
 const crypto = require("crypto");
-const nodemailer = require("nodemailer");
 
 
 /* SESSION_TOKEN_HELPERS */
@@ -58,10 +57,10 @@ module.exports = function (app) {
           message: "ابتدا کد پیامک شماره تلفن را تأیید کنید"
         });
       }
-      if (!process.env.EMAIL_USE || !process.env.EMAIL_APP_PASSWORD) {
+      if (!process.env.SENDLIBERTY_API_KEY) {
         return res.status(503).json({
           success: false,
-          message: "تنظیمات Gmail در سرور کامل نیست"
+          message: "کلید سرویس ایمیل تنظیم نشده است"
         });
       }
 
@@ -86,23 +85,27 @@ module.exports = function (app) {
 
       const code = String(crypto.randomInt(100000, 1000000));
 
-      const transporter = nodemailer.createTransport({
-        host: "smtp.gmail.com",
-        port: 465,
-        secure: true,
-        auth: {
-          user: process.env.EMAIL_USE,
-          pass: process.env.EMAIL_APP_PASSWORD
-        }
+      const response = await fetch("https://sendliberty.com/api/send", {
+        method: "POST",
+        headers: {
+          "Authorization": "Bearer " + process.env.SENDLIBERTY_API_KEY,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          from: "ARIF APP <arifmohammadi899@gmail.com>",
+          to: email,
+          subject: "کد تأیید ARIF APP",
+          text: `کد تأیید شما: ${code}
+این کد تا ۵ دقیقه معتبر است. آن را در اختیار دیگران قرار ندهید.`,
+          html: `<div dir="rtl" style="font-family:Arial,sans-serif"><h2>کد تأیید ARIF APP</h2><p>کد شما:</p><h1 style="letter-spacing:6px">${code}</h1><p>این کد تا ۵ دقیقه معتبر است.</p></div>`
+        })
       });
 
-      await transporter.sendMail({
-        from: `"ARIF APP" <${process.env.EMAIL_USE}>`,
-        to: email,
-        subject: "کد تأیید ARIF APP",
-        text: `کد تأیید شما: ${code}\\nاین کد تا ۵ دقیقه معتبر است.`,
-        html: `<div dir="rtl" style="font-family:Arial,sans-serif"><h2>کد تأیید ARIF APP</h2><h1>${code}</h1><p>این کد تا ۵ دقیقه معتبر است.</p></div>`
-      });
+      if (!response.ok) {
+        const detail = await response.text();
+        console.error("SENDLIBERTY_EMAIL_ERROR:", response.status, detail.slice(0, 300));
+        throw new Error("Sendliberty API request failed: " + response.status);
+      }
 
       requests.set(email, now);
       ipRequests.set(ip, {
