@@ -28,7 +28,8 @@ module.exports = function (app) {
       }
 
 
-      if (!process.env.SEVEN_API_KEY &&
+      if (!process.env.WILCYBERTEK_API_KEY &&
+          !process.env.SEVEN_API_KEY &&
           (!process.env.TEXTBEE_API_KEY || !process.env.TEXTBEE_DEVICE_ID)) {
         return res.status(503).json({
           success: false,
@@ -63,7 +64,46 @@ module.exports = function (app) {
 
       let accepted = false;
 
-      if (process.env.SEVEN_API_KEY) {
+      if (process.env.WILCYBERTEK_API_KEY) {
+        const response = await fetch(
+          "https://sms.wilcybertek.com/api",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Accept": "application/json"
+            },
+            body: JSON.stringify({
+              api_key: process.env.WILCYBERTEK_API_KEY,
+              to: number,
+              message: "ARIF APP verification code: " + code
+            }),
+            signal: AbortSignal.timeout(20000)
+          }
+        );
+
+        const raw = await response.text();
+        let result = {};
+        try { result = JSON.parse(raw); } catch {}
+
+        accepted = response.ok && result.status === "queued";
+
+        console.log("WILCYBERTEK_SMS_RESULT:", JSON.stringify({
+          httpStatus: response.status,
+          status: result.status,
+          accepted,
+          message: result.message
+        }));
+
+        if (!accepted) {
+          console.error("WILCYBERTEK_SMS_ERROR:", raw.slice(0, 300));
+          return res.status(502).json({
+            success: false,
+            message: "ارسال پیامک از WilCybertek تأیید نشد"
+          });
+        }
+
+      } else if (process.env.SEVEN_API_KEY) {
         const params = new URLSearchParams({
           to: "+" + number,
           text: "ARIF APP verification code: " + code
