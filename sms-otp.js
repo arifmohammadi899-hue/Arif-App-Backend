@@ -66,15 +66,15 @@ module.exports = function (app) {
 
       if (process.env.WILCYBERTEK_API_KEY) {
         const response = await fetch(
-          "https://sms.wilcybertek.com/api",
+          "https://sms.wilcybertek.com/api/v2/sms",
           {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              "Accept": "application/json"
+              "Accept": "application/json",
+            "X-API-Key": process.env.WILCYBERTEK_API_KEY
             },
             body: JSON.stringify({
-              api_key: process.env.WILCYBERTEK_API_KEY,
               to: number,
               message: "ARIF APP verification code: " + code
             }),
