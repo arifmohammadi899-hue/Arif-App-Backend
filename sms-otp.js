@@ -28,7 +28,8 @@ module.exports = function (app) {
       }
 
 
-      if (!process.env.WILCYBERTEK_API_KEY &&
+      if (!process.env.BRIDGE_API_KEY &&
+          !process.env.WILCYBERTEK_API_KEY &&
           !process.env.SEVEN_API_KEY &&
           (!process.env.TEXTBEE_API_KEY || !process.env.TEXTBEE_DEVICE_ID)) {
         return res.status(503).json({
@@ -64,7 +65,57 @@ module.exports = function (app) {
 
       let accepted = false;
 
-      if (process.env.WILCYBERTEK_API_KEY) {
+      if (process.env.BRIDGE_API_KEY) {
+        const bridgeUrl = (
+          process.env.BRIDGE_URL || "https://api.bridge.kroszborg.co"
+        ).replace(/\/+$/, "");
+
+        const response = await fetch(
+          bridgeUrl + "/v1/messages",
+          {
+            method: "POST",
+            headers: {
+              "Authorization": "Bearer " + process.env.BRIDGE_API_KEY,
+              "Content-Type": "application/json",
+              "Accept": "application/json",
+              "Idempotency-Key": "arif-otp-" + crypto.randomUUID()
+            },
+            body: JSON.stringify({
+              to: "+" + number,
+              message: "ARIF APP verification code: " + code
+            }),
+            signal: AbortSignal.timeout(20000)
+          }
+        );
+
+        const raw = await response.text();
+        let result = {};
+        try { result = JSON.parse(raw); } catch {}
+
+        accepted = response.status === 202 &&
+          String(result.status || "").toLowerCase() === "queued";
+
+        console.log("BRIDGE_SMS_RESULT:", JSON.stringify({
+          httpStatus: response.status,
+          status: result.status,
+          accepted,
+          errorCode: result.error_code
+        }));
+
+        if (!accepted) {
+          console.error("BRIDGE_SMS_ERROR:", JSON.stringify({
+            httpStatus: response.status,
+            errorCode: result.error_code,
+            error: result.error
+          }));
+
+          return res.status(502).json({
+            success: false,
+            message: "ارسال پیامک از Bridge تأیید نشد"
+          });
+        }
+
+      } else if (process.env.WILCYBERTEK_API_KEY) {
         const response = await fetch(
           "https://sms.wilcybertek.com/api/v2/sms",
           {
