@@ -86,7 +86,7 @@ module.exports = function (app) {
         let result = {};
         try { result = JSON.parse(raw); } catch {}
 
-        accepted = response.ok && result.status === "queued";
+        accepted = response.ok && String(result.status || "").toUpperCase() === "QUEUED";
 
         console.log("WILCYBERTEK_SMS_RESULT:", JSON.stringify({
           httpStatus: response.status,
