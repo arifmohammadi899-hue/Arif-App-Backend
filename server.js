@@ -1931,6 +1931,7 @@ app.delete("/api/awareness/posts/:id", async (req, res) => {
 
 require("./otp")(app);
 require("./sms-otp")(app);
+require("./password-auth")(app);
 // SMS OTP disabled
 
 app.get("/api/app-version", (req, res) => {
