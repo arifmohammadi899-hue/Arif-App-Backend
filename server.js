@@ -1050,7 +1050,7 @@ app.get("/api/marketplace/ads", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const q = new URLSearchParams({
-      select: "id,user_id,category,title,price,currency,description,phone,photos,video_url,seller,created_at",
+      select: "id,user_id,category,title,price,currency,description,phone,city,address,latitude,longitude,photos,video_url,seller,created_at",
       order: "created_at.desc",
       limit: "100"
     });
@@ -1095,6 +1095,12 @@ app.post("/api/marketplace/ads", async (req, res) => {
   const currency = String(req.body.currency || "AFN").trim().toUpperCase();
   const description = String(req.body.description || "").trim().slice(0, 5000);
   const phone = String(req.body.phone || "").trim().slice(0, 25);
+  const city = String(req.body.city || "").trim().slice(0, 100);
+  const address = String(req.body.address || "").trim().slice(0, 300);
+  const hasLatitude = req.body.latitude !== null && req.body.latitude !== undefined && String(req.body.latitude).trim() !== "";
+  const hasLongitude = req.body.longitude !== null && req.body.longitude !== undefined && String(req.body.longitude).trim() !== "";
+  const latitude = hasLatitude ? Number(req.body.latitude) : null;
+  const longitude = hasLongitude ? Number(req.body.longitude) : null;
   const photos = Array.isArray(req.body.photos) ? req.body.photos : [];
   const video = String(req.body.video || req.body.video_url || "");
 
@@ -1104,6 +1110,13 @@ app.post("/api/marketplace/ads", async (req, res) => {
   }
   if (!["AFN", "IRR"].includes(currency)) {
     return res.status(400).json({ success: false, message: "واحد پول معتبر نیست" });
+  }
+  if (hasLatitude !== hasLongitude ||
+      (hasLatitude && (
+        !Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+        !Number.isFinite(longitude) || longitude < -180 || longitude > 180
+      ))) {
+    return res.status(400).json({ success: false, message: "موقعیت مکانی معتبر نیست" });
   }
   if (photos.length > 3) {
     return res.status(400).json({ success: false, message: "حداکثر ۳ عکس انتخاب کنید" });
@@ -1150,6 +1163,10 @@ app.post("/api/marketplace/ads", async (req, res) => {
         currency,
         description,
         phone,
+        city,
+        address,
+        latitude,
+        longitude,
         photos: storedPhotos,
         video_url: storedVideo,
         seller: session.email
@@ -1257,6 +1274,97 @@ async function arifChatSignedImage(path) {
   if (/^https?:\/\//i.test(signed)) return signed;
   return base + "/storage/v1" + (signed.startsWith("/") ? signed : "/" + signed);
 }
+
+
+app.get("/api/chat/conversations", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const myId = Number(me.id);
+    const q = new URLSearchParams({
+      select: "id,user_one_id,user_two_id,created_at,last_message_at",
+      or: "(user_one_id.eq." + myId + ",user_two_id.eq." + myId + ")",
+      order: "last_message_at.desc.nullslast",
+      limit: "100"
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_conversations?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!r.ok) throw new Error("chat_conversations_read_failed");
+
+    const rows = await r.json();
+    const conversations = Array.isArray(rows) ? rows : [];
+    if (!conversations.length) {
+      return res.json({ success: true, conversations: [] });
+    }
+
+    const ids = conversations.map(c => String(
+      Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
+    )).filter(id => /^[0-9]+$/.test(id));
+
+    const uq = new URLSearchParams({
+      select: "id,email",
+      id: "in.(" + ids.join(",") + ")"
+    });
+    const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!ur.ok) throw new Error("chat_users_read_failed");
+
+    const users = await ur.json();
+    const emailById = new Map((Array.isArray(users) ? users : [])
+      .map(u => [String(u.id), String(u.email || "")]));
+
+    const conversationIds = conversations.map(c => String(c.id));
+    const mq = new URLSearchParams({
+      select: "id,conversation_id,sender_id,message_type,message_text,created_at",
+      conversation_id: "in.(" + conversationIds.join(",") + ")",
+      order: "created_at.desc",
+      limit: "500"
+    });
+    const mr = await fetch(base + "/rest/v1/chat_messages?" + mq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!mr.ok) throw new Error("chat_messages_read_failed");
+
+    const messages = await mr.json();
+    const lastByConversation = new Map();
+    for (const m of (Array.isArray(messages) ? messages : [])) {
+      const id = String(m.conversation_id);
+      if (!lastByConversation.has(id)) lastByConversation.set(id, m);
+    }
+
+    return res.json({
+      success: true,
+      conversations: conversations.map(c => {
+        const otherId = String(
+          Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
+        );
+        const last = lastByConversation.get(String(c.id));
+        return {
+          id: c.id,
+          other_user_email: emailById.get(otherId) || "کاربر",
+          last_message: last
+            ? (last.message_type === "image" ? "🖼️ عکس" : String(last.message_text || "").slice(0, 120))
+            : "هنوز پیامی ارسال نشده",
+          last_message_at: last ? last.created_at : c.last_message_at
+        };
+      })
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_LIST_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "دریافت صندوق پیام ناموفق بود" });
+  }
+});
 
 app.post("/api/chat/conversations", async (req, res) => {
   const session = marketSession(req);
@@ -1589,7 +1697,7 @@ app.get("/api/awareness/posts", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const q = new URLSearchParams({
-      select: "id,user_id,content,media_type,media_path,created_at,price,price_currency",
+      select: "id,user_id,content,media_type,media_path,media2_type,media2_path,created_at,price,price_currency",
       order: "created_at.desc",
       limit: "100"
     });
@@ -1617,6 +1725,8 @@ app.get("/api/awareness/posts", async (req, res) => {
       content: post.content || "",
       media_type: post.media_type || "text",
       media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
+      media2_type: post.media2_type || null,
+      media2_url: post.media2_path ? await arifAwarenessSignedMedia(post.media2_path) : null,
       price: post.price == null ? null : Number(post.price),
       price_currency: post.price_currency || null,
       created_at: post.created_at
@@ -1636,7 +1746,19 @@ app.get("/api/awareness/posts", async (req, res) => {
 });
 
 app.post("/api/awareness/posts", async (req, res) => {
-  let uploadedPath = null;
+  const uploadedPaths = [];
+
+  const cleanupUploads = async (base, key) => {
+    for (const path of uploadedPaths) {
+      try {
+        const objectPath = path.split("/").map(encodeURIComponent).join("/");
+        await fetch(base + "/storage/v1/object/awareness-media/" + objectPath, {
+          method: "DELETE",
+          headers: { apikey: key, Authorization: "Bearer " + key }
+        });
+      } catch (_) {}
+    }
+  };
 
   try {
     const session = marketSession(req);
@@ -1656,10 +1778,16 @@ app.post("/api/awareness/posts", async (req, res) => {
     }
 
     const content = String(req.body.content || "").trim();
-    const dataUrl = String(req.body.media_data || "");
     const rawPrice = req.body.price;
     const priceCurrency = String(req.body.price_currency || "").trim().toUpperCase();
     let price = null;
+
+    if (content.length > 5000) {
+      return res.status(400).json({
+        success: false,
+        message: "متن پست نباید بیشتر از ۵۰۰۰ حرف باشد"
+      });
+    }
 
     if (rawPrice !== undefined && rawPrice !== null && String(rawPrice).trim() !== "") {
       price = Number(rawPrice);
@@ -1677,19 +1805,36 @@ app.post("/api/awareness/posts", async (req, res) => {
       }
     }
 
-    let mediaType = "text";
-    let mediaPath = null;
-    let mediaBuffer = null;
-    let mime = "";
+    const dataUrls = [
+      String(req.body.media_data || ""),
+      String(req.body.media2_data || "")
+    ].filter(Boolean);
 
-    if (content.length > 5000) {
+    if (!content && dataUrls.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "متن پست نباید بیشتر از ۵۰۰۰ حرف باشد"
+        message: "متن یا عکس یا ویدیو وارد کنید"
       });
     }
 
-    if (dataUrl) {
+    if (dataUrls.length > 2) {
+      return res.status(400).json({
+        success: false,
+        message: "حداکثر دو فایل می‌توانید انتخاب کنید"
+      });
+    }
+
+    const extByMime = {
+      "image/jpeg": "jpg",
+      "image/png": "png",
+      "image/webp": "webp",
+      "video/mp4": "mp4",
+      "video/quicktime": "mov",
+      "video/webm": "webm"
+    };
+
+    const mediaItems = [];
+    for (const dataUrl of dataUrls) {
       const match = dataUrl.match(/^data:(image\/(?:jpeg|png|webp)|video\/(?:mp4|quicktime|webm));base64,([A-Za-z0-9+/=\r\n]+)$/);
       if (!match) {
         return res.status(400).json({
@@ -1698,32 +1843,43 @@ app.post("/api/awareness/posts", async (req, res) => {
         });
       }
 
-      mime = match[1];
-      mediaBuffer = Buffer.from(match[2], "base64");
+      const mime = match[1];
+      const buffer = Buffer.from(match[2], "base64");
 
-      if (!mediaBuffer.length || mediaBuffer.length > 2500000) {
+      if (!buffer.length || buffer.length > 2500000) {
         return res.status(400).json({
           success: false,
-          message: "حجم عکس یا ویدیو باید حداکثر ۲٫۵ مگابایت باشد"
+          message: "حجم هر عکس یا ویدیو باید حداکثر ۲٫۵ مگابایت باشد"
         });
       }
 
-      mediaType = mime.startsWith("image/") ? "image" : "video";
+      mediaItems.push({
+        type: mime.startsWith("image/") ? "image" : "video",
+        mime,
+        buffer,
+        ext: extByMime[mime]
+      });
+    }
 
-      const extByMime = {
-        "image/jpeg": "jpg",
-        "image/png": "png",
-        "image/webp": "webp",
-        "video/mp4": "mp4",
-        "video/quicktime": "mov",
-        "video/webm": "webm"
-      };
-      const crypto = require("crypto");
-      mediaPath = "awareness/" + user.id + "/" +
-        crypto.randomUUID() + "." + extByMime[mime];
+    if (mediaItems.length === 2 &&
+        mediaItems[0].type === mediaItems[1].type) {
+      return res.status(400).json({
+        success: false,
+        message: "باید یک عکس و یک ویدیو انتخاب کنید"
+      });
+    }
 
-      const { base, key } = marketConfig();
+    // اگر هر دو فایل وجود دارند، ترتیب ذخیره همیشه عکس سپس ویدیو است.
+    mediaItems.sort((a, b) => a.type === "image" ? -1 : 1);
+
+    const { base, key } = marketConfig();
+    const crypto = require("crypto");
+
+    for (const item of mediaItems) {
+      const mediaPath = "awareness/" + user.id + "/" +
+        crypto.randomUUID() + "." + item.ext;
       const objectPath = mediaPath.split("/").map(encodeURIComponent).join("/");
+
       const upload = await fetch(
         base + "/storage/v1/object/awareness-media/" + objectPath,
         {
@@ -1731,32 +1887,30 @@ app.post("/api/awareness/posts", async (req, res) => {
           headers: {
             apikey: key,
             Authorization: "Bearer " + key,
-            "Content-Type": mime,
+            "Content-Type": item.mime,
             "x-upsert": "false"
           },
-          body: mediaBuffer
+          body: item.buffer
         }
       );
 
       if (!upload.ok) {
         const detail = await upload.text().catch(() => "");
         console.error("AWARENESS_UPLOAD_ERROR:", upload.status, detail.slice(0, 200));
+        await cleanupUploads(base, key);
         return res.status(503).json({
           success: false,
           message: "ذخیره عکس یا ویدیو ناموفق بود؛ تنظیمات باکت را بررسی کنید"
         });
       }
-      uploadedPath = mediaPath;
+
+      item.path = mediaPath;
+      uploadedPaths.push(mediaPath);
     }
 
-    if (!content && !mediaPath) {
-      return res.status(400).json({
-        success: false,
-        message: "متن یا عکس یا ویدیو وارد کنید"
-      });
-    }
+    const first = mediaItems[0] || null;
+    const second = mediaItems[1] || null;
 
-    const { base, key } = marketConfig();
     const insert = await fetch(base + "/rest/v1/awareness_posts", {
       method: "POST",
       headers: {
@@ -1768,8 +1922,10 @@ app.post("/api/awareness/posts", async (req, res) => {
       body: JSON.stringify([{
         user_id: user.id,
         content,
-        media_type: mediaType,
-        media_path: mediaPath,
+        media_type: first ? first.type : "text",
+        media_path: first ? first.path : null,
+        media2_type: second ? second.type : null,
+        media2_path: second ? second.path : null,
         price,
         price_currency: price === null ? null : priceCurrency
       }])
@@ -1778,15 +1934,7 @@ app.post("/api/awareness/posts", async (req, res) => {
     if (!insert.ok) {
       const detail = await insert.text().catch(() => "");
       console.error("AWARENESS_INSERT_ERROR:", insert.status, detail.slice(0, 200));
-
-      if (uploadedPath) {
-        const objectPath = uploadedPath.split("/").map(encodeURIComponent).join("/");
-        await fetch(base + "/storage/v1/object/awareness-media/" + objectPath, {
-          method: "DELETE",
-          headers: { apikey: key, Authorization: "Bearer " + key }
-        }).catch(() => {});
-      }
-
+      await cleanupUploads(base, key);
       return res.status(503).json({
         success: false,
         message: "ذخیره پست در پایگاه داده ناموفق بود"
@@ -1805,12 +1953,18 @@ app.post("/api/awareness/posts", async (req, res) => {
         content: post.content || "",
         media_type: post.media_type || "text",
         media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
+        media2_type: post.media2_type || null,
+        media2_url: post.media2_path ? await arifAwarenessSignedMedia(post.media2_path) : null,
         price: post.price == null ? null : Number(post.price),
         price_currency: post.price_currency || null,
         created_at: post.created_at
-      } : null,
+      } : null
     });
   } catch (e) {
+    try {
+      const { base, key } = marketConfig();
+      await cleanupUploads(base, key);
+    } catch (_) {}
     console.error("AWARENESS_CREATE_ERROR:", String(e.message || e).slice(0, 180));
     return res.status(503).json({
       success: false,
@@ -1818,7 +1972,6 @@ app.post("/api/awareness/posts", async (req, res) => {
     });
   }
 });
-
 
 app.delete("/api/awareness/posts/:id", async (req, res) => {
   try {
@@ -1845,7 +1998,7 @@ app.delete("/api/awareness/posts/:id", async (req, res) => {
 
     const { base, key } = marketConfig();
     const lookup = new URLSearchParams({
-      select: "id,user_id,media_path",
+      select: "id,user_id,media_path,media2_path",
       id: "eq." + postId,
       limit: "1"
     });
@@ -1898,9 +2051,9 @@ app.delete("/api/awareness/posts/:id", async (req, res) => {
       });
     }
 
-    if (post.media_path) {
+    for (const mediaPath of [post.media_path, post.media2_path].filter(Boolean)) {
       try {
-        const objectPath = String(post.media_path).split("/").map(encodeURIComponent).join("/");
+        const objectPath = String(mediaPath).split("/").map(encodeURIComponent).join("/");
         const mediaDelete = await fetch(
           base + "/storage/v1/object/awareness-media/" + objectPath,
           {
