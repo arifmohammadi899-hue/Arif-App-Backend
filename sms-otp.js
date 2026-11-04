@@ -20,7 +20,7 @@ module.exports = function (app) {
       const phone = normalizePhone(req.body.phone);
       const number = phone.replace(/^\+/, "");
 
-      if (!validEmail(email) || !/^\d{8,15}$/.test(number)) {
+      if (!/^\d{8,15}$/.test(number)) {
         return res.status(400).json({
           success: false,
           message: "ایمیل و شماره تلفن معتبر وارد کنید"
@@ -39,7 +39,7 @@ module.exports = function (app) {
       }
 
       const now = Date.now();
-      const key = email + "|" + number;
+      const key = number;
       const last = requests.get(key);
 
       if (last && now - last < 60000) {
@@ -287,10 +287,10 @@ module.exports = function (app) {
     const phone = normalizePhone(req.body.phone);
     const number = phone.replace(/^\+/, "");
     const code = String(req.body.code || "");
-    const key = email + "|" + number;
+    const key = number;
     const entry = codes.get(key);
 
-    if (!validEmail(email) || !/^\d{8,15}$/.test(number) ||
+    if (!/^\d{8,15}$/.test(number) ||
         !entry || entry.expires < Date.now() || entry.tries >= 5) {
       codes.delete(key);
       return res.status(400).json({

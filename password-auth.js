@@ -64,7 +64,7 @@ module.exports = function (app) {
         return res.status(400).json({ success: false, message: "گذرواژه باید حداقل ۸ نویسه باشد" });
       }
 
-      const smsKey = email + "|" + number;
+      const smsKey = number;
       const smsExpiry = smsVerified.get(smsKey);
       if (!smsExpiry || smsExpiry < Date.now()) {
         smsVerified.delete(smsKey);
