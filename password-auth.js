@@ -97,7 +97,7 @@ module.exports = function (app) {
       const emailRows = await emailResponse.json();
       const existing = emailRows[0] || null;
 
-      if (!existing || existing.email_verified !== true || existing.phone_verified !== true) {
+      if (existing && existing.phone_verified !== true) {
         return res.status(403).json({
           success: false,
           message: "ابتدا ثبت‌نام و تأیید ایمیل و شماره تلفن را کامل کنید"
@@ -176,6 +176,7 @@ module.exports = function (app) {
       return res.json({
         success: true,
         sessionToken: createSession(email, secret),
+        emailVerified: existing ? existing.email_verified === true : false,
         message: "گذرواژه ثبت شد"
       });
     } catch (err) {
@@ -240,8 +241,7 @@ module.exports = function (app) {
       const rows = await response.json();
       const user = rows[0];
 
-      if (!user || user.email_verified !== true ||
-          user.phone_verified !== true || !user.password_hash ||
+      if (!user || user.phone_verified !== true || !user.password_hash ||
           !verifyPassword(password, user.password_hash)) {
         return res.status(401).json({
           success: false,
@@ -261,7 +261,7 @@ module.exports = function (app) {
           username: user.username || "",
           country: user.country || "",
           dialCode: user.dial_code || "",
-          emailVerified: true,
+          emailVerified: user.email_verified === true,
           phoneVerified: true
         },
         message: "ورود موفق بود"
