@@ -1230,6 +1230,137 @@ app.delete("/api/marketplace/ads/:id", async (req, res) => {
     return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
   }
 });
+
+/* SAVED_MARKETPLACE_API_V1 */
+function validSavedAdId(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
+}
+
+app.get("/api/marketplace/saved", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const sq = new URLSearchParams({
+      select: "ad_id,created_at",
+      user_id: "eq." + user.id,
+      order: "created_at.desc"
+    });
+    const sr = await fetch(base + "/rest/v1/saved_marketplace_ads?" + sq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!sr.ok) throw new Error("saved_ads_lookup_failed");
+
+    const savedRows = await sr.json();
+    if (!Array.isArray(savedRows) || !savedRows.length) {
+      return res.json({ success: true, ads: [] });
+    }
+
+    const ids = savedRows.map(row => row.ad_id).filter(validSavedAdId);
+    if (!ids.length) return res.json({ success: true, ads: [] });
+
+    const aq = new URLSearchParams({
+      select: "id,user_id,category,title,price,currency,description,phone,city,address,latitude,longitude,photos,video_url,seller,created_at",
+      id: "in.(" + ids.join(",") + ")"
+    });
+    const ar = await fetch(base + "/rest/v1/marketplace_ads?" + aq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+    if (!ar.ok) throw new Error("saved_ad_details_lookup_failed");
+
+    const rows = await ar.json();
+    const byId = new Map(rows.map(ad => [String(ad.id), ad]));
+    const ads = [];
+
+    for (const saved of savedRows) {
+      const ad = byId.get(String(saved.ad_id));
+      if (!ad) continue;
+      const photos = await Promise.all(
+        (Array.isArray(ad.photos) ? ad.photos : []).map(path => marketSignedMedia(base, key, path))
+      );
+      const video_url = await marketSignedMedia(base, key, ad.video_url || "");
+      ads.push({ ...ad, photos: photos.filter(Boolean), video_url, saved_at: saved.created_at });
+    }
+
+    return res.json({ success: true, ads });
+  } catch (e) {
+    console.error("SAVED_MARKETPLACE_LIST_ERROR:", String(e.message || e).slice(0, 160));
+    return res.status(503).json({ success: false, message: "دریافت آگهی‌های ذخیره‌شده ناموفق بود" });
+  }
+});
+
+app.post("/api/marketplace/saved/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  const id = String(req.params.id || "");
+  if (!validSavedAdId(id)) return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({ on_conflict: "user_id,ad_id" });
+    const r = await fetch(base + "/rest/v1/saved_marketplace_ads?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({ user_id: user.id, ad_id: id })
+    });
+    if (!r.ok) {
+      console.error("SAVED_MARKETPLACE_ADD_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ذخیره آگهی ناموفق بود" });
+    }
+    return res.json({ success: true, saved: true });
+  } catch (e) {
+    console.error("SAVED_MARKETPLACE_ADD_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
+  }
+});
+
+app.delete("/api/marketplace/saved/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  const id = String(req.params.id || "");
+  if (!validSavedAdId(id)) return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({ user_id: "eq." + user.id, ad_id: "eq." + id });
+    const r = await fetch(base + "/rest/v1/saved_marketplace_ads?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=minimal"
+      }
+    });
+    if (!r.ok) {
+      console.error("SAVED_MARKETPLACE_REMOVE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "حذف از ذخیره‌ها ناموفق بود" });
+    }
+    return res.json({ success: true, saved: false });
+  } catch (e) {
+    console.error("SAVED_MARKETPLACE_REMOVE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال بازار آنلاین برقرار نشد" });
+  }
+});
+/* END SAVED_MARKETPLACE_API_V1 */
+
 /* END MARKETPLACE_API_V1 */
 
 
@@ -1290,7 +1421,7 @@ app.get("/api/chat/conversations", async (req, res) => {
 
     const myId = Number(me.id);
     const q = new URLSearchParams({
-      select: "id,user_one_id,user_two_id,created_at,last_message_at",
+      select: "id,user_one_id,user_two_id,conversation_type,created_at,last_message_at",
       or: "(user_one_id.eq." + myId + ",user_two_id.eq." + myId + ")",
       order: "last_message_at.desc.nullslast",
       limit: "100"
@@ -1352,6 +1483,7 @@ app.get("/api/chat/conversations", async (req, res) => {
         const last = lastByConversation.get(String(c.id));
         return {
           id: c.id,
+          conversation_type: c.conversation_type,
           other_user_email: emailById.get(otherId) || "کاربر",
           last_message: last
             ? (last.message_type === "image" ? "🖼️ عکس" : String(last.message_text || "").slice(0, 120))
@@ -1406,9 +1538,10 @@ app.post("/api/chat/conversations", async (req, res) => {
 
     const payload = {
       user_one_id: Math.min(myId, sellerId),
-      user_two_id: Math.max(myId, sellerId)
+      user_two_id: Math.max(myId, sellerId),
+      conversation_type: "marketplace"
     };
-    const cq = new URLSearchParams({ on_conflict: "user_one_id,user_two_id" });
+    const cq = new URLSearchParams({ on_conflict: "user_one_id,user_two_id,conversation_type" });
     const cr = await fetch(base + "/rest/v1/chat_conversations?" + cq, {
       method: "POST",
       headers: {
@@ -1437,6 +1570,154 @@ app.post("/api/chat/conversations", async (req, res) => {
   } catch (e) {
     console.error("ARIF_CHAT_OPEN_ERROR:", String(e.message || e).slice(0, 150));
     return res.status(503).json({ success: false, message: "اتصال چت برقرار نشد" });
+  }
+});
+
+
+/* ARIF_PRIVATE_CONTACTS_V1 */
+
+// تطبیق شماره مخاطبان با کاربران تأییدشده؛ فهرست مخاطبان ذخیره نمی‌شود.
+app.post("/api/chat/match-contacts", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  try {
+    const input = Array.isArray(req.body?.phones) ? req.body.phones.slice(0, 500) : [];
+    const phones = [...new Set(input.map(value => {
+      let phone = String(value || "").replace(/[\s()-]/g, "");
+      if (phone.startsWith("00")) phone = "+" + phone.slice(2);
+      if (!phone.startsWith("+")) phone = "+" + phone;
+      return /^\+[0-9]{8,15}$/.test(phone) ? phone : "";
+    }).filter(Boolean))];
+
+    if (!phones.length) {
+      return res.json({ success: true, users: [] });
+    }
+
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({
+      select: "id,phone,first_name,surname,username",
+      phone_verified: "eq.true",
+      phone: "in.(" + phones.join(",") + ")",
+      limit: "500"
+    });
+
+    const r = await fetch(base + "/rest/v1/app_users?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) throw new Error("contact_match_query_failed");
+
+    const rows = await r.json();
+    const users = (Array.isArray(rows) ? rows : [])
+      .filter(u => String(u.id) !== String(me.id))
+      .map(u => ({
+        id: u.id,
+        phone: String(u.phone || ""),
+        name: [u.first_name, u.surname].filter(Boolean).join(" ").trim()
+          || String(u.username || "کاربر عارف")
+      }));
+
+    return res.json({ success: true, users });
+  } catch (e) {
+    console.error("ARIF_CONTACT_MATCH_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "پیدا کردن مخاطبان ناموفق بود" });
+  }
+});
+
+// ساخت گفتگوی خصوصی مستقل از گفتگوی آگهی
+app.post("/api/chat/private-conversations", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  try {
+    const targetId = Number(req.body?.user_id);
+    if (!Number.isSafeInteger(targetId) || targetId <= 0) {
+      return res.status(400).json({ success: false, message: "شناسه کاربر معتبر نیست" });
+    }
+
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const myId = Number(me.id);
+    if (!Number.isSafeInteger(myId) || targetId === myId) {
+      return res.status(400).json({ success: false, message: "نمی‌توانید به خودتان پیام بدهید" });
+    }
+
+    const uq = new URLSearchParams({
+      select: "id,phone_verified,first_name,surname,username",
+      id: "eq." + targetId,
+      phone_verified: "eq.true",
+      limit: "1"
+    });
+
+    const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!ur.ok) throw new Error("private_chat_user_lookup_failed");
+
+    const targetRows = await ur.json();
+    const target = Array.isArray(targetRows) ? targetRows[0] : null;
+
+    if (!target) {
+      return res.status(404).json({ success: false, message: "کاربر تأییدشده پیدا نشد" });
+    }
+
+    const payload = {
+      user_one_id: Math.min(myId, targetId),
+      user_two_id: Math.max(myId, targetId),
+      conversation_type: "private"
+    };
+
+    const cq = new URLSearchParams({
+      on_conflict: "user_one_id,user_two_id,conversation_type"
+    });
+
+    const cr = await fetch(base + "/rest/v1/chat_conversations?" + cq, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=representation"
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!cr.ok) throw new Error("private_chat_create_failed");
+
+    const rows = await cr.json();
+    const conversation = Array.isArray(rows) ? rows[0] : null;
+
+    if (!conversation) {
+      return res.status(503).json({ success: false, message: "گفتگوی خصوصی ساخته نشد" });
+    }
+
+    const name = [target.first_name, target.surname].filter(Boolean).join(" ").trim()
+      || String(target.username || "کاربر عارف");
+
+    return res.json({
+      success: true,
+      conversation,
+      other_user_id: targetId,
+      other_user_name: name
+    });
+  } catch (e) {
+    console.error("ARIF_PRIVATE_CHAT_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ساخت گفتگوی خصوصی ناموفق بود" });
   }
 });
 
