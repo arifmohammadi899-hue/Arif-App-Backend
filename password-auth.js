@@ -87,7 +87,7 @@ module.exports = function (app) {
       const root = base.replace(/\/$/, "") + "/rest/v1/app_users";
 
       const emailQuery = new URLSearchParams({
-        select: "id,email,phone,email_verified,phone_verified,first_name,surname,username,country,dial_code",
+        select: "id,email,phone,email_verified,phone_verified,first_name,surname,username,country,dial_code,profile_photo_path",
         email: "eq." + email,
         limit: "1"
       });
@@ -138,9 +138,49 @@ module.exports = function (app) {
         });
       }
 
+      let profilePhotoPath = existing?.profile_photo_path || "";
+      const photoData = String(req.body.profile_photo_data || "");
+
+      if (photoData) {
+        const photoMatch = photoData.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+        if (!photoMatch) {
+          return res.status(400).json({ success: false, message: "فرمت عکس پروفایل معتبر نیست" });
+        }
+
+        const photoBuffer = Buffer.from(photoMatch[2], "base64");
+        if (!photoBuffer.length || photoBuffer.length > 2 * 1024 * 1024) {
+          return res.status(400).json({ success: false, message: "حجم عکس پروفایل بیش از حد مجاز است" });
+        }
+
+        const extension = photoMatch[1] === "jpeg" ? "jpg" : photoMatch[1];
+        profilePhotoPath = "profiles/" + crypto.randomUUID() + "." + extension;
+
+        const uploadUrl = base.replace(/\/$/, "") +
+          "/storage/v1/object/marketplace-media/" +
+          profilePhotoPath.split("/").map(encodeURIComponent).join("/");
+
+        const uploadResponse = await fetch(uploadUrl, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key,
+            "Content-Type": "image/" + photoMatch[1],
+            "x-upsert": "true"
+          },
+          body: photoBuffer
+        });
+
+        if (!uploadResponse.ok) {
+          const detail = await uploadResponse.text();
+          console.error("PROFILE_PHOTO_UPLOAD_ERROR:", uploadResponse.status, detail.slice(0, 180));
+          return res.status(503).json({ success: false, message: "بارگذاری عکس پروفایل انجام نشد" });
+        }
+      }
+
       const userData = {
         email,
         phone: "+" + number,
+        profile_photo_path: profilePhotoPath || null,
         first_name: firstName,
         surname,
         username,
@@ -177,6 +217,7 @@ module.exports = function (app) {
         success: true,
         sessionToken: createSession(email, secret),
         emailVerified: existing ? existing.email_verified === true : false,
+        profilePhotoPath,
         message: "گذرواژه ثبت شد"
       });
     } catch (err) {
@@ -215,7 +256,7 @@ module.exports = function (app) {
       }
 
       const filters = {
-        select: "email,phone,email_verified,phone_verified,password_hash,first_name,surname,username,country,dial_code",
+        select: "email,phone,email_verified,phone_verified,password_hash,first_name,surname,username,country,dial_code,profile_photo_path",
         limit: "1"
       };
 
@@ -261,6 +302,7 @@ module.exports = function (app) {
           username: user.username || "",
           country: user.country || "",
           dialCode: user.dial_code || "",
+          profilePhotoPath: user.profile_photo_path || "",
           emailVerified: user.email_verified === true,
           phoneVerified: true
         },
