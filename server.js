@@ -1764,7 +1764,7 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       created_at: m.created_at
     })));
 
-    return res.json({ success: true, messages: result });
+    return res.json({ success: true, current_user_id: me.id, messages: result });
   } catch (e) {
     console.error("ARIF_CHAT_MESSAGES_ERROR:", String(e.message || e).slice(0, 150));
     return res.status(503).json({ success: false, message: "دریافت پیام‌ها ناموفق بود" });
