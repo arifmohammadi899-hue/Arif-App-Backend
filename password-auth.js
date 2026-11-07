@@ -43,6 +43,44 @@ function verifyPassword(password, stored) {
   }
 }
 
+
+async function createProfilePhotoUrl(base, key, path) {
+  try {
+    if (!path) return "";
+    if (/^https?:\/\//i.test(String(path))) return String(path);
+
+    const encoded = String(path).split("/")
+      .map(encodeURIComponent).join("/");
+    const response = await fetch(
+      base.replace(/\/$/, "") +
+      "/storage/v1/object/sign/marketplace-media/" + encoded,
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ expiresIn: 3600 })
+      }
+    );
+
+    if (!response.ok) return "";
+    const data = await response.json();
+    const signed = data.signedURL || data.signedUrl || "";
+    if (!signed) return "";
+    if (/^https?:\/\//i.test(signed)) return signed;
+
+    const pathPart = signed.startsWith("/") ? signed : "/" + signed;
+    return base.replace(/\/$/, "") +
+      (pathPart.startsWith("/storage/v1/")
+        ? pathPart
+        : "/storage/v1" + pathPart);
+  } catch (_) {
+    return "";
+  }
+}
+
 module.exports = function (app) {
   app.post("/api/auth/set-password", async (req, res) => {
     try {
@@ -218,6 +256,7 @@ module.exports = function (app) {
         sessionToken: createSession(email, secret),
         emailVerified: existing ? existing.email_verified === true : false,
         profilePhotoPath,
+        profilePhotoUrl: await createProfilePhotoUrl(base, key, profilePhotoPath),
         message: "گذرواژه ثبت شد"
       });
     } catch (err) {
@@ -281,6 +320,9 @@ module.exports = function (app) {
 
       const rows = await response.json();
       const user = rows[0];
+      const profilePhotoUrl = await createProfilePhotoUrl(
+        base, key, user && user.profile_photo_path
+      );
 
       if (!user || user.phone_verified !== true || !user.password_hash ||
           !verifyPassword(password, user.password_hash)) {
@@ -303,6 +345,7 @@ module.exports = function (app) {
           country: user.country || "",
           dialCode: user.dial_code || "",
           profilePhotoPath: user.profile_photo_path || "",
+          profilePhotoUrl,
           emailVerified: user.email_verified === true,
           phoneVerified: true
         },
@@ -463,6 +506,142 @@ module.exports = function (app) {
     } catch (err) {
       console.error("PASSWORD_RESET_ERROR:", String(err.message || err).slice(0, 160));
       return res.status(503).json({ success: false, message: "تغییر گذرواژه ناموفق بود" });
+    }
+  });
+
+
+  // Authenticated profile editing: phone, email and password are immutable here.
+  app.patch("/api/profile", async (req, res) => {
+    try {
+      const secret = process.env.ARIF_SESSION_SECRET;
+      const base = process.env.SUPABASE_URL;
+      const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      if (!secret || Buffer.byteLength(secret) < 32 || !base || !key) {
+        return res.status(503).json({ success: false, message: "تنظیمات امن سرور آماده نیست" });
+      }
+
+      const auth = String(req.headers.authorization || "");
+      const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+      const parts = token.split(".");
+      if (parts.length !== 2) {
+        return res.status(401).json({ success: false, message: "نشست معتبر نیست؛ دوباره وارد شوید" });
+      }
+
+      const expected = crypto.createHmac("sha256", secret).update(parts[0]).digest();
+      let actual;
+      try { actual = Buffer.from(parts[1], "base64url"); } catch (_) { actual = Buffer.alloc(0); }
+      if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+        return res.status(401).json({ success: false, message: "نشست معتبر نیست؛ دوباره وارد شوید" });
+      }
+
+      let session;
+      try { session = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8")); }
+      catch (_) {
+        return res.status(401).json({ success: false, message: "نشست معتبر نیست" });
+      }
+      const email = String(session.email || "").trim().toLowerCase();
+      if (!validEmail(email) || !Number.isFinite(session.exp) || session.exp <= Math.floor(Date.now() / 1000)) {
+        return res.status(401).json({ success: false, message: "نشست منقضی شده است؛ دوباره وارد شوید" });
+      }
+
+      const firstName = String(req.body.first_name || "").trim();
+      const surname = String(req.body.surname || "").trim();
+      const username = String(req.body.username || "").trim();
+      if (!firstName || firstName.length > 100 || !surname || surname.length > 100 ||
+          username.length < 3 || username.length > 50) {
+        return res.status(400).json({ success: false, message: "نام، نام خانوادگی یا نام کاربری معتبر نیست" });
+      }
+
+      const headers = {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json"
+      };
+      const root = base.replace(/\/$/, "") + "/rest/v1/app_users";
+
+      const userQuery = new URLSearchParams({
+        select: "id,email,first_name,surname,username,profile_photo_path",
+        email: "eq." + email,
+        limit: "1"
+      });
+      const userResponse = await fetch(root + "?" + userQuery, { headers });
+      if (!userResponse.ok) throw new Error("PROFILE_USER_LOOKUP_FAILED");
+      const users = await userResponse.json();
+      const user = users[0];
+      if (!user) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+      const nameQuery = new URLSearchParams({
+        select: "id",
+        username: "eq." + username,
+        limit: "2"
+      });
+      const nameResponse = await fetch(root + "?" + nameQuery, { headers });
+      if (!nameResponse.ok) throw new Error("PROFILE_USERNAME_LOOKUP_FAILED");
+      const nameRows = await nameResponse.json();
+      if (nameRows.some(row => String(row.id) !== String(user.id))) {
+        return res.status(409).json({ success: false, message: "این نام کاربری قبلاً استفاده شده است" });
+      }
+
+      let profilePhotoPath = user.profile_photo_path || "";
+      const photoData = String(req.body.profile_photo_data || "");
+      if (photoData) {
+        const match = photoData.match(/^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/);
+        if (!match) return res.status(400).json({ success: false, message: "فرمت عکس معتبر نیست" });
+
+        const buffer = Buffer.from(match[2], "base64");
+        if (!buffer.length || buffer.length > 2 * 1024 * 1024) {
+          return res.status(400).json({ success: false, message: "حجم عکس بیش از حد مجاز است" });
+        }
+
+        const ext = match[1] === "jpeg" ? "jpg" : match[1];
+        profilePhotoPath = "profiles/" + crypto.randomUUID() + "." + ext;
+        const uploadUrl = base.replace(/\/$/, "") +
+          "/storage/v1/object/marketplace-media/" +
+          profilePhotoPath.split("/").map(encodeURIComponent).join("/");
+        const upload = await fetch(uploadUrl, {
+          method: "POST",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key,
+            "Content-Type": "image/" + match[1],
+            "x-upsert": "true"
+          },
+          body: buffer
+        });
+        if (!upload.ok) {
+          console.error("PROFILE_EDIT_PHOTO_UPLOAD_ERROR:", upload.status);
+          return res.status(503).json({ success: false, message: "بارگذاری عکس انجام نشد" });
+        }
+      }
+
+      const updateData = { first_name: firstName, surname, username };
+      if (photoData) updateData.profile_photo_path = profilePhotoPath;
+
+      const updateQuery = new URLSearchParams({ id: "eq." + user.id });
+      const saved = await fetch(root + "?" + updateQuery, {
+        method: "PATCH",
+        headers: { ...headers, Prefer: "return=minimal" },
+        body: JSON.stringify(updateData)
+      });
+      if (!saved.ok) {
+        console.error("PROFILE_EDIT_SAVE_ERROR:", saved.status);
+        return res.status(503).json({ success: false, message: "ذخیره اطلاعات پروفایل ناموفق بود" });
+      }
+
+      return res.json({
+        success: true,
+        profile: {
+          firstName,
+          surname,
+          name: (firstName + " " + surname).trim(),
+          username,
+          profilePhotoPath,
+          profilePhotoUrl: await createProfilePhotoUrl(base, key, profilePhotoPath)
+        }
+      });
+    } catch (err) {
+      console.error("PROFILE_EDIT_ERROR:", String(err.message || err).slice(0, 180));
+      return res.status(503).json({ success: false, message: "ویرایش پروفایل ناموفق بود" });
     }
   });
 
