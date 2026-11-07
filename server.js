@@ -1370,7 +1370,7 @@ app.delete("/api/marketplace/saved/:id", async (req, res) => {
 async function arifChatConversation(conversationId, userId) {
   const { base, key } = marketConfig();
   const q = new URLSearchParams({
-    select: "id,user_one_id,user_two_id",
+    select: "id,user_one_id,user_two_id,disappearing_seconds",
     id: "eq." + conversationId,
     limit: "1"
   });
@@ -1384,6 +1384,35 @@ async function arifChatConversation(conversationId, userId) {
   if (Number(c.user_one_id) !== Number(userId) &&
       Number(c.user_two_id) !== Number(userId)) return null;
   return c;
+}
+
+function arifChatOtherUserId(conversation, userId) {
+  const me = Number(userId);
+  const one = Number(conversation.user_one_id);
+  const two = Number(conversation.user_two_id);
+  if (me === one) return two;
+  if (me === two) return one;
+  return null;
+}
+
+async function arifChatIsBlocked(conversation, userId) {
+  const { base, key } = marketConfig();
+  const otherId = arifChatOtherUserId(conversation, userId);
+  if (!otherId) throw new Error("chat_other_user_not_found");
+
+  const me = Number(userId);
+  const q = new URLSearchParams({
+    select: "id",
+    or: `(and(blocker_id.eq.${me},blocked_user_id.eq.${otherId}),and(blocker_id.eq.${otherId},blocked_user_id.eq.${me}))`,
+    limit: "1"
+  });
+
+  const r = await fetch(base + "/rest/v1/chat_blocks?" + q, {
+    headers: { apikey: key, Authorization: "Bearer " + key }
+  });
+  if (!r.ok) throw new Error("chat_block_lookup_failed");
+  const rows = await r.json();
+  return Array.isArray(rows) && rows.length > 0;
 }
 
 async function arifChatSignedImage(path) {
@@ -1417,7 +1446,9 @@ app.get("/api/chat/conversations", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const me = await marketUser(session.email);
-    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
 
     const myId = Number(me.id);
     const q = new URLSearchParams({
@@ -1438,12 +1469,12 @@ app.get("/api/chat/conversations", async (req, res) => {
       return res.json({ success: true, conversations: [] });
     }
 
-    const ids = conversations.map(c => String(
+    const ids = [...new Set(conversations.map(c => String(
       Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
-    )).filter(id => /^[0-9]+$/.test(id));
+    )).filter(id => /^[0-9]+$/.test(id)))];
 
     const uq = new URLSearchParams({
-      select: "id,email",
+      select: "id,phone,first_name,surname,username",
       id: "in.(" + ids.join(",") + ")"
     });
     const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
@@ -1452,8 +1483,8 @@ app.get("/api/chat/conversations", async (req, res) => {
     if (!ur.ok) throw new Error("chat_users_read_failed");
 
     const users = await ur.json();
-    const emailById = new Map((Array.isArray(users) ? users : [])
-      .map(u => [String(u.id), String(u.email || "")]));
+    const userById = new Map((Array.isArray(users) ? users : [])
+      .map(u => [String(u.id), u]));
 
     const conversationIds = conversations.map(c => String(c.id));
     const mq = new URLSearchParams({
@@ -1480,11 +1511,17 @@ app.get("/api/chat/conversations", async (req, res) => {
         const otherId = String(
           Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
         );
+        const other = userById.get(otherId) || {};
         const last = lastByConversation.get(String(c.id));
+        const otherName = [other.first_name, other.surname]
+          .filter(Boolean).join(" ").trim() || String(other.username || "");
+
         return {
           id: c.id,
           conversation_type: c.conversation_type,
-          other_user_email: emailById.get(otherId) || "کاربر",
+          other_user_id: otherId,
+          other_user_name: otherName,
+          other_user_phone: String(other.phone || ""),
           last_message: last
             ? (last.message_type === "image" ? "🖼️ عکس" : String(last.message_text || "").slice(0, 120))
             : "هنوز پیامی ارسال نشده",
@@ -1494,7 +1531,10 @@ app.get("/api/chat/conversations", async (req, res) => {
     });
   } catch (e) {
     console.error("ARIF_CHAT_LIST_ERROR:", String(e.message || e).slice(0, 150));
-    return res.status(503).json({ success: false, message: "دریافت صندوق پیام ناموفق بود" });
+    return res.status(503).json({
+      success: false,
+      message: "دریافت صندوق پیام ناموفق بود"
+    });
   }
 });
 
@@ -1742,9 +1782,17 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "این گفتگو در دسترس نیست"
+      });
+    }
+
     const q = new URLSearchParams({
       select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at",
       conversation_id: "eq." + conversationId,
+      or: "(expires_at.is.null,expires_at.gt." + new Date().toISOString() + ")",
       order: "created_at.asc",
       limit: "200"
     });
@@ -1796,6 +1844,13 @@ app.post("/api/chat/conversations/:id/messages", async (req, res) => {
       return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال پیام به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
     const r = await fetch(base + "/rest/v1/chat_messages", {
       method: "POST",
       headers: {
@@ -1809,7 +1864,10 @@ app.post("/api/chat/conversations/:id/messages", async (req, res) => {
         sender_id: me.id,
         message_type: "text",
         message_text: messageText,
-        image_path: null
+        image_path: null,
+        expires_at: Number(conversation.disappearing_seconds || 0) > 0
+          ? new Date(Date.now() + Number(conversation.disappearing_seconds) * 1000).toISOString()
+          : null
       })
     });
     if (!r.ok) {
@@ -1867,6 +1925,13 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
       return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال تصویر به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
     const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[match[1]];
     const imagePath = conversationId + "/" + me.id + "/" + require("crypto").randomUUID() + "." + ext;
     const storageUrl = base + "/storage/v1/object/chat-images/" +
@@ -1904,7 +1969,10 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
         sender_id: me.id,
         message_type: "image",
         message_text: null,
-        image_path: imagePath
+        image_path: imagePath,
+        expires_at: Number(conversation.disappearing_seconds || 0) > 0
+          ? new Date(Date.now() + Number(conversation.disappearing_seconds) * 1000).toISOString()
+          : null
       })
     });
 
@@ -1948,6 +2016,339 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
 });
 
 
+
+
+
+/* ARIF_CHAT_REPORT_API_V1 */
+app.post("/api/chat/conversations/:id/report", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  const allowedReasons = [
+    "spam",
+    "harassment",
+    "scam",
+    "inappropriate_content",
+    "impersonation",
+    "other"
+  ];
+
+  const reason = String(req.body?.reason || "").trim();
+  if (!allowedReasons.includes(reason)) {
+    return res.status(400).json({ success: false, message: "دلیل گزارش معتبر نیست" });
+  }
+
+  const detailsValue = req.body?.details;
+  if (detailsValue != null && typeof detailsValue !== "string") {
+    return res.status(400).json({ success: false, message: "توضیحات گزارش معتبر نیست" });
+  }
+
+  const details = String(detailsValue || "").trim();
+  if (details.length > 1000) {
+    return res.status(400).json({ success: false, message: "توضیحات حداکثر ۱۰۰۰ نویسه باشد" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) {
+      return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+    }
+
+    const r = await fetch(base + "/rest/v1/chat_reports", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({
+        reporter_id: me.id,
+        reported_user_id: otherId,
+        conversation_id: conversation.id,
+        reason,
+        details: details || null
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_REPORT_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "ثبت گزارش انجام نشد" });
+    }
+
+    return res.status(201).json({ success: true, message: "گزارش ثبت شد" });
+  } catch (e) {
+    console.error("ARIF_CHAT_REPORT_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت گزارش ناموفق بود" });
+  }
+});
+/* END ARIF_CHAT_REPORT_API_V1 */
+
+
+
+/* ARIF_CHAT_BLOCK_API_V1 */
+
+app.post("/api/chat/conversations/:id/block", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+
+    const url = new URLSearchParams({
+      on_conflict: "blocker_id,blocked_user_id"
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_blocks?" + url, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=ignore-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        blocker_id: me.id,
+        blocked_user_id: otherId
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_BLOCK_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "مسدودسازی انجام نشد" });
+    }
+
+    return res.json({ success: true, blocked: true });
+  } catch (e) {
+    console.error("ARIF_CHAT_BLOCK_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "مسدودسازی ناموفق بود" });
+  }
+});
+
+app.delete("/api/chat/conversations/:id/block", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+
+    const q = new URLSearchParams({
+      blocker_id: "eq." + me.id,
+      blocked_user_id: "eq." + otherId
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_blocks?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=minimal"
+      }
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_UNBLOCK_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "رفع مسدودسازی انجام نشد" });
+    }
+
+    return res.json({ success: true, blocked: false });
+  } catch (e) {
+    console.error("ARIF_CHAT_UNBLOCK_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "رفع مسدودسازی ناموفق بود" });
+  }
+});
+
+app.get("/api/chat/conversations/:id/block-status", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+
+    const q = new URLSearchParams({
+      select: "id",
+      blocker_id: "eq." + me.id,
+      blocked_user_id: "eq." + otherId,
+      limit: "1"
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_blocks?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_BLOCK_STATUS_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "بررسی وضعیت انجام نشد" });
+    }
+
+    const rows = await r.json();
+    return res.json({ success: true, blocked: Array.isArray(rows) && rows.length > 0 });
+  } catch (e) {
+    console.error("ARIF_CHAT_BLOCK_STATUS_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "بررسی وضعیت ناموفق بود" });
+  }
+});
+
+/* END ARIF_CHAT_BLOCK_API_V1 */
+
+
+/* ARIF_CHAT_DISAPPEARING_API_V1 */
+
+app.get("/api/chat/conversations/:id/disappearing", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    return res.json({
+      success: true,
+      seconds: Number(conversation.disappearing_seconds || 0)
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_DISAPPEARING_READ_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "خواندن تنظیم ناموفق بود" });
+  }
+});
+
+app.patch("/api/chat/conversations/:id/disappearing", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  const seconds = Number(req.body && req.body.seconds);
+  if (![0, 36000, 86400].includes(seconds)) {
+    return res.status(400).json({ success: false, message: "مدت زمان انتخاب‌شده معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({ id: "eq." + conversationId });
+    const r = await fetch(base + "/rest/v1/chat_conversations?" + q, {
+      method: "PATCH",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({ disappearing_seconds: seconds })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_DISAPPEARING_UPDATE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "ذخیره تنظیم ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    return res.json({ success: true, seconds: Number(rows[0].disappearing_seconds || 0) });
+  } catch (e) {
+    console.error("ARIF_CHAT_DISAPPEARING_UPDATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ذخیره تنظیم ناموفق بود" });
+  }
+});
+
+/* END ARIF_CHAT_DISAPPEARING_API_V1 */
 
 /* ARIF_AWARENESS_API_V1 */
 
@@ -2521,8 +2922,138 @@ app.get("/admin/api/chat/conversations/:id/messages", async (req, res) => {
 });
 /* END ADMIN_CHAT_VIEW_API */
 
+
+/* ARIF_CHAT_EXPIRY_CLEANUP_V1 */
+let arifChatExpiryCleanupRunning = false;
+
+async function arifCleanupExpiredChatMessages() {
+  if (arifChatExpiryCleanupRunning) return;
+  arifChatExpiryCleanupRunning = true;
+
+  try {
+    const { base, key } = marketConfig();
+    const now = new Date().toISOString();
+
+    const q = new URLSearchParams({
+      select: "id,message_type,image_path,expires_at",
+      expires_at: "lt." + now,
+      order: "expires_at.asc",
+      limit: "100"
+    });
+
+    const response = await fetch(
+      base + "/rest/v1/chat_messages?" + q,
+      {
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("expired_messages_read_failed_" + response.status);
+    }
+
+    const messages = await response.json();
+    let deleted = 0;
+    let skipped = 0;
+
+    for (const message of (Array.isArray(messages) ? messages : [])) {
+      try {
+        if (message.image_path) {
+          const objectPath = String(message.image_path)
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/");
+
+          const storageDelete = await fetch(
+            base + "/storage/v1/object/chat-images/" + objectPath,
+            {
+              method: "DELETE",
+              headers: {
+                apikey: key,
+                Authorization: "Bearer " + key
+              }
+            }
+          );
+
+          if (!storageDelete.ok && storageDelete.status !== 404) {
+            skipped++;
+            console.error(
+              "ARIF_CHAT_EXPIRY_STORAGE_ERROR:",
+              storageDelete.status
+            );
+            continue;
+          }
+        }
+
+        const deleteQuery = new URLSearchParams({
+          id: "eq." + String(message.id),
+          expires_at: "lt." + now,
+          select: "id"
+        });
+
+        const dbDelete = await fetch(
+          base + "/rest/v1/chat_messages?" + deleteQuery,
+          {
+            method: "DELETE",
+            headers: {
+              apikey: key,
+              Authorization: "Bearer " + key,
+              Prefer: "return=representation"
+            }
+          }
+        );
+
+        if (!dbDelete.ok) {
+          skipped++;
+          console.error(
+            "ARIF_CHAT_EXPIRY_DB_DELETE_ERROR:",
+            dbDelete.status
+          );
+          continue;
+        }
+
+        const deletedRows = await dbDelete.json();
+        if (Array.isArray(deletedRows) && deletedRows.length) {
+          deleted += deletedRows.length;
+        }
+      } catch (itemError) {
+        skipped++;
+        console.error(
+          "ARIF_CHAT_EXPIRY_ITEM_ERROR:",
+          String(itemError.message || itemError).slice(0, 120)
+        );
+      }
+    }
+
+    if (deleted || skipped) {
+      console.log(
+        "ARIF_CHAT_EXPIRY_CLEANUP:",
+        "deleted=" + deleted,
+        "skipped=" + skipped
+      );
+    }
+  } catch (error) {
+    console.error(
+      "ARIF_CHAT_EXPIRY_CLEANUP_ERROR:",
+      String(error.message || error).slice(0, 150)
+    );
+  } finally {
+    arifChatExpiryCleanupRunning = false;
+  }
+}
+/* END ARIF_CHAT_EXPIRY_CLEANUP_V1 */
+
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Arif App Backend running on port ${PORT}`);
+
+  void arifCleanupExpiredChatMessages();
+
+  setInterval(() => {
+    void arifCleanupExpiredChatMessages();
+  }, 5 * 60 * 1000);
 });
