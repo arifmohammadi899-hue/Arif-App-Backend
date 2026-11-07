@@ -2350,6 +2350,257 @@ app.patch("/api/chat/conversations/:id/disappearing", async (req, res) => {
 
 /* END ARIF_CHAT_DISAPPEARING_API_V1 */
 
+
+/* ARIF_CHAT_PRESENCE_API_V1 */
+
+app.post("/api/chat/presence/heartbeat", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const now = new Date().toISOString();
+    const q = new URLSearchParams({ on_conflict: "user_id" });
+    const r = await fetch(base + "/rest/v1/chat_presence?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        user_id: me.id,
+        last_seen_at: now,
+        updated_at: now
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRESENCE_HEARTBEAT_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ثبت وضعیت حضور ناموفق بود" });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRESENCE_HEARTBEAT_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت وضعیت حضور ناموفق بود" });
+  }
+});
+
+app.get("/api/chat/privacy/last-seen", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({
+      select: "last_seen_visibility",
+      user_id: "eq." + me.id,
+      limit: "1"
+    });
+    const r = await fetch(base + "/rest/v1/chat_user_privacy?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRIVACY_READ_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "خواندن حریم خصوصی ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    const visibility = Array.isArray(rows) && rows.length
+      ? rows[0].last_seen_visibility
+      : "everyone";
+
+    return res.json({
+      success: true,
+      visibility: ["everyone", "nobody"].includes(visibility) ? visibility : "everyone"
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRIVACY_READ_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "خواندن حریم خصوصی ناموفق بود" });
+  }
+});
+
+app.patch("/api/chat/privacy/last-seen", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  const visibility = String(req.body && req.body.visibility || "");
+  if (!["everyone", "nobody"].includes(visibility)) {
+    return res.status(400).json({ success: false, message: "تنظیم حریم خصوصی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({ on_conflict: "user_id" });
+    const r = await fetch(base + "/rest/v1/chat_user_privacy?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        user_id: me.id,
+        last_seen_visibility: visibility,
+        updated_at: new Date().toISOString()
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRIVACY_UPDATE_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ذخیره حریم خصوصی ناموفق بود" });
+    }
+
+    return res.json({ success: true, visibility });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRIVACY_UPDATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ذخیره حریم خصوصی ناموفق بود" });
+  }
+});
+
+
+app.post("/api/chat/presence/leave", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const now = new Date();
+    const lastSeen = now.toISOString();
+    const offlineAt = new Date(now.getTime() - 120000).toISOString();
+
+    const q = new URLSearchParams({ on_conflict: "user_id" });
+    const r = await fetch(base + "/rest/v1/chat_presence?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        user_id: me.id,
+        last_seen_at: lastSeen,
+        updated_at: offlineAt
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRESENCE_LEAVE_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ثبت خروج ناموفق بود" });
+    }
+
+    return res.json({ success: true, last_seen_at: lastSeen });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRESENCE_LEAVE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت خروج ناموفق بود" });
+  }
+});
+
+app.get("/api/chat/conversations/:id/presence", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.json({ success: true, visible: false, online: false, last_seen_at: null });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) {
+      return res.status(404).json({ success: false, message: "مخاطب گفت‌وگو پیدا نشد" });
+    }
+
+    const privacyQ = new URLSearchParams({
+      select: "last_seen_visibility",
+      user_id: "eq." + otherId,
+      limit: "1"
+    });
+    const presenceQ = new URLSearchParams({
+      select: "last_seen_at,updated_at",
+      user_id: "eq." + otherId,
+      limit: "1"
+    });
+
+    const [privacyR, presenceR] = await Promise.all([
+      fetch(base + "/rest/v1/chat_user_privacy?" + privacyQ, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      }),
+      fetch(base + "/rest/v1/chat_presence?" + presenceQ, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      })
+    ]);
+
+    if (!privacyR.ok || !presenceR.ok) {
+      console.error("ARIF_CHAT_PRESENCE_READ_ERROR:", privacyR.status, presenceR.status);
+      return res.status(503).json({ success: false, message: "دریافت وضعیت مخاطب ناموفق بود" });
+    }
+
+    const privacyRows = await privacyR.json();
+    const presenceRows = await presenceR.json();
+    const visibility = Array.isArray(privacyRows) && privacyRows.length
+      ? privacyRows[0].last_seen_visibility
+      : "everyone";
+
+    if (visibility !== "everyone") {
+      return res.json({ success: true, visible: false, online: false, last_seen_at: null });
+    }
+
+    const presence = Array.isArray(presenceRows) && presenceRows.length
+      ? presenceRows[0]
+      : null;
+
+    const updatedAt = presence && presence.updated_at
+      ? new Date(presence.updated_at).getTime()
+      : 0;
+    const online = Number.isFinite(updatedAt) &&
+      updatedAt > 0 &&
+      Date.now() - updatedAt <= 60000;
+
+    return res.json({
+      success: true,
+      visible: true,
+      online,
+      last_seen_at: online ? null : (presence ? presence.last_seen_at : null)
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRESENCE_READ_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "دریافت وضعیت مخاطب ناموفق بود" });
+  }
+});
+
+/* END ARIF_CHAT_PRESENCE_API_V1 */
+
 /* ARIF_AWARENESS_API_V1 */
 
 async function arifAwarenessSignedMedia(path) {
