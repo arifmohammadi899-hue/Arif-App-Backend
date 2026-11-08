@@ -1809,6 +1809,7 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       message_type: m.message_type,
       message_text: m.message_text,
       image_url: m.message_type === "image" ? await arifChatSignedImage(m.image_path) : null,
+      video_url: m.message_type === "video" ? await arifChatSignedImage(m.image_path) : null,
       created_at: m.created_at
     })));
 
@@ -2017,6 +2018,313 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
 
 
 
+
+
+app.post("/api/chat/conversations/:id/media/upload-token", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const mime = String(req.body.mime_type || "");
+  const size = Number(req.body.file_size);
+
+  const types = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm"
+  };
+
+  if (!/^[0-9]+$/.test(conversationId) ||
+      !types[mime] ||
+      !Number.isSafeInteger(size) ||
+      size < 1 || size > 52428800) {
+    return res.status(400).json({
+      success: false,
+      message: "نوع یا حجم فایل معتبر نیست؛ حداکثر ۵۰ مگابایت"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const publicKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+    if (!publicKey) throw new Error("supabase_publishable_key_missing");
+
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال رسانه به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const path = conversationId + "/" + me.id + "/" +
+      marketCrypto.randomUUID() + "." + types[mime];
+
+    const objectPath = path.split("/").map(encodeURIComponent).join("/");
+    const signedResponse = await fetch(
+      base + "/storage/v1/object/upload/sign/chat-images/" + objectPath,
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ upsert: false })
+      }
+    );
+
+    if (!signedResponse.ok) {
+      console.error("ARIF_CHAT_TUS_SIGN_ERROR:", signedResponse.status);
+      return res.status(503).json({
+        success: false,
+        message: "صدور مجوز آپلود ناموفق بود"
+      });
+    }
+
+    const signedData = await signedResponse.json();
+    if (!signedData.token) throw new Error("storage_upload_token_missing");
+
+    let storageBase = base;
+    try {
+      const u = new URL(base);
+      const match = u.hostname.match(/^([^.]+)\.supabase\.co$/i);
+      if (match) {
+        u.hostname = match[1] + ".storage.supabase.co";
+        storageBase = u.origin;
+      }
+    } catch (_) {}
+
+    return res.json({
+      success: true,
+      path,
+      token: signedData.token,
+      tus_endpoint: storageBase + "/storage/v1/upload/resumable",
+      api_key: publicKey,
+      file_size: size,
+      mime_type: mime
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_TUS_TOKEN_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({
+      success: false,
+      message: "آماده‌سازی آپلود ناموفق بود"
+    });
+  }
+});
+
+app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const path = String(req.body.path || "");
+  const mime = String(req.body.mime_type || "");
+  const size = Number(req.body.file_size);
+
+  const types = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm"
+  };
+
+  if (!/^[0-9]+$/.test(conversationId) ||
+      !types[mime] ||
+      !Number.isSafeInteger(size) ||
+      size < 1 || size > 52428800) {
+    return res.status(400).json({
+      success: false,
+      message: "اطلاعات رسانه معتبر نیست"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال رسانه به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const prefix = conversationId + "/" + me.id + "/";
+    const filename = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+
+    if (!/^[0-9a-f-]{36}\.(jpg|png|webp|mp4|mov|webm)$/i.test(filename) ||
+        !filename.toLowerCase().endsWith("." + types[mime])) {
+      return res.status(400).json({
+        success: false,
+        message: "مسیر فایل معتبر نیست"
+      });
+    }
+
+    const parent = path.slice(0, path.lastIndexOf("/") + 1);
+    const name = path.slice(path.lastIndexOf("/") + 1);
+
+    const listResponse = await fetch(
+      base + "/storage/v1/object/list/chat-images",
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prefix: parent,
+          search: name,
+          limit: 100
+        })
+      }
+    );
+
+    if (!listResponse.ok) {
+      throw new Error("chat_media_storage_check_failed");
+    }
+
+    const objects = await listResponse.json();
+    const object = Array.isArray(objects)
+      ? objects.find(item => item.name === name)
+      : null;
+
+    const actualSize = object && object.metadata
+      ? Number(object.metadata.size)
+      : NaN;
+
+    if (!object ||
+        !Number.isSafeInteger(actualSize) ||
+        actualSize !== size ||
+        actualSize > 52428800) {
+      return res.status(400).json({
+        success: false,
+        message: "فایل آپلودشده تأیید نشد یا حجم آن مطابقت ندارد"
+      });
+    }
+
+    const messageType = mime.startsWith("video/") ? "video" : "image";
+    const disappearingSeconds = Number(conversation.disappearing_seconds || 0);
+
+    const r = await fetch(base + "/rest/v1/chat_messages", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        conversation_id: Number(conversationId),
+        sender_id: me.id,
+        message_type: messageType,
+        message_text: null,
+        image_path: path,
+        expires_at: disappearingSeconds > 0
+          ? new Date(Date.now() + disappearingSeconds * 1000).toISOString()
+          : null
+      })
+    });
+
+    if (!r.ok) {
+      const objectPath = path.split("/").map(encodeURIComponent).join("/");
+
+      await fetch(
+        base + "/storage/v1/object/chat-images/" + objectPath,
+        {
+          method: "DELETE",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key
+          }
+        }
+      ).catch(() => {});
+
+      console.error(
+        "ARIF_CHAT_MEDIA_DB_ERROR:",
+        r.status,
+        (await r.text()).slice(0, 200)
+      );
+
+      return res.status(503).json({
+        success: false,
+        message: "ثبت رسانه در گفت‌وگو ناموفق بود"
+      });
+    }
+
+    await fetch(
+      base + "/rest/v1/chat_conversations?id=eq." +
+        encodeURIComponent(conversationId),
+      {
+        method: "PATCH",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal"
+        },
+        body: JSON.stringify({
+          last_message_at: new Date().toISOString()
+        })
+      }
+    );
+
+    const rows = await r.json();
+    const message = Array.isArray(rows) ? rows[0] : null;
+    const signedUrl = await arifChatSignedImage(path);
+
+    return res.status(201).json({
+      success: true,
+      message: message ? {
+        id: message.id,
+        conversation_id: message.conversation_id,
+        sender_id: message.sender_id,
+        message_type: messageType,
+        image_url: messageType === "image" ? signedUrl : null,
+        video_url: messageType === "video" ? signedUrl : null,
+        created_at: message.created_at
+      } : null
+    });
+  } catch (e) {
+    console.error(
+      "ARIF_CHAT_MEDIA_COMPLETE_ERROR:",
+      String(e.message || e).slice(0, 150)
+    );
+
+    return res.status(503).json({
+      success: false,
+      message: "ثبت رسانه ناموفق بود"
+    });
+  }
+});
 
 
 /* ARIF_CHAT_REPORT_API_V1 */
