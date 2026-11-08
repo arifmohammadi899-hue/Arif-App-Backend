@@ -2949,6 +2949,33 @@ app.get("/api/awareness/posts", async (req, res) => {
 
     const rows = await r.json();
 
+    const authorIds = [...new Set(
+      (Array.isArray(rows) ? rows : [])
+        .map(post => String(post.user_id))
+        .filter(Boolean)
+    )];
+
+    const phoneByUserId = new Map();
+
+    if (authorIds.length) {
+      const usersQuery = new URLSearchParams({
+        select: "id,phone",
+        id: "in.(" + authorIds.join(",") + ")"
+      });
+
+      const usersResponse = await fetch(
+        base + "/rest/v1/app_users?" + usersQuery,
+        { headers: { apikey: key, Authorization: "Bearer " + key } }
+      );
+
+      if (usersResponse.ok) {
+        const users = await usersResponse.json();
+        for (const u of users) {
+          if (u.phone) phoneByUserId.set(String(u.id), String(u.phone));
+        }
+      }
+    }
+
     let currentUserId = null;
     try {
       const session = marketSession(req);
@@ -2962,7 +2989,7 @@ app.get("/api/awareness/posts", async (req, res) => {
       id: post.id,
       user_id: post.user_id,
       is_owner: currentUserId !== null && currentUserId === String(post.user_id),
-      author: "کاربر #" + post.user_id,
+      author: phoneByUserId.get(String(post.user_id)) || "شماره ثبت نشده",
       content: post.content || "",
       media_type: post.media_type || "text",
       media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
@@ -3185,12 +3212,29 @@ app.post("/api/awareness/posts", async (req, res) => {
     const rows = await insert.json();
     const post = Array.isArray(rows) ? rows[0] : null;
 
+    let authorPhone = null;
+    if (post && user && user.id) {
+      const authorQuery = new URLSearchParams({
+        select: "phone",
+        id: "eq." + user.id,
+        limit: "1"
+      });
+      const authorResponse = await fetch(
+        base + "/rest/v1/app_users?" + authorQuery,
+        { headers: { apikey: key, Authorization: "Bearer " + key } }
+      );
+      if (authorResponse.ok) {
+        const authorRows = await authorResponse.json();
+        authorPhone = authorRows[0]?.phone || null;
+      }
+    }
+
     return res.status(201).json({
       success: true,
       post: post ? {
         id: post.id,
         user_id: post.user_id,
-        author: "کاربر #" + post.user_id,
+        author: authorPhone || "شماره ثبت نشده",
         content: post.content || "",
         media_type: post.media_type || "text",
         media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
