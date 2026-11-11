@@ -1361,6 +1361,152 @@ app.delete("/api/marketplace/saved/:id", async (req, res) => {
 });
 /* END SAVED_MARKETPLACE_API_V1 */
 
+/* ARIF_JOB_ADS_API_V1 */
+
+// نمایش آگهی‌های استخدام و جویای کار
+app.get("/api/job-ads", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const { base, key } = marketConfig();
+    const q = new URLSearchParams({
+      select: "id,user_id,ad_type,title,description,city,address,salary,phone,contact_name,created_at",
+      order: "created_at.desc"
+    });
+
+    const r = await fetch(base + "/rest/v1/job_ads?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) {
+      console.error("JOB_ADS_LIST_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "دریافت آگهی‌های کار ناموفق بود" });
+    }
+
+    return res.json({ success: true, ads: await r.json() });
+  } catch (e) {
+    console.error("JOB_ADS_LIST_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال آگهی کار برقرار نشد" });
+  }
+});
+
+// ثبت آگهی استخدام یا جویای کار
+app.post("/api/job-ads", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const body = req.body || {};
+  const adType = String(body.ad_type || "");
+  const title = String(body.title || "").trim().slice(0, 120);
+  const description = String(body.description || "").trim().slice(0, 3000);
+  const city = String(body.city || "").trim().slice(0, 100);
+  const address = String(body.address || "").trim().slice(0, 250);
+  const salary = String(body.salary || "").trim().slice(0, 100);
+  const phone = String(body.phone || "").trim().slice(0, 40);
+  const contactName = String(body.contact_name || "").trim().slice(0, 100);
+
+  if (!["hire", "seeking"].includes(adType)) {
+    return res.status(400).json({ success: false, message: "نوع آگهی معتبر نیست" });
+  }
+  if (!title || !city || !phone) {
+    return res.status(400).json({ success: false, message: "عنوان، شهر و شماره تماس الزامی است" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const r = await fetch(base + "/rest/v1/job_ads", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        user_id: user.id,
+        ad_type: adType,
+        title,
+        description,
+        city,
+        address,
+        salary,
+        phone,
+        contact_name: contactName
+      })
+    });
+
+    if (!r.ok) {
+      console.error("JOB_ADS_CREATE_ERROR:", r.status, (await r.text()).slice(0, 180));
+      return res.status(503).json({ success: false, message: "ثبت آگهی کار ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    return res.status(201).json({ success: true, ad: rows[0] });
+  } catch (e) {
+    console.error("JOB_ADS_CREATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت آگهی کار ناموفق بود" });
+  }
+});
+
+// حذف آگهی فقط توسط صاحب آن
+app.delete("/api/job-ads/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const id = String(req.params.id || "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({
+      id: "eq." + id,
+      user_id: "eq." + user.id
+    });
+
+    const r = await fetch(base + "/rest/v1/job_ads?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=representation"
+      }
+    });
+
+    if (!r.ok) {
+      console.error("JOB_ADS_DELETE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "حذف آگهی کار ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "آگهی پیدا نشد یا متعلق به شما نیست" });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("JOB_ADS_DELETE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "حذف آگهی کار ناموفق بود" });
+  }
+});
+
+/* END ARIF_JOB_ADS_API_V1 */
+
+
 /* END MARKETPLACE_API_V1 */
 
 
@@ -1810,6 +1956,7 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       message_text: m.message_text,
       image_url: m.message_type === "image" ? await arifChatSignedImage(m.image_path) : null,
       video_url: m.message_type === "video" ? await arifChatSignedImage(m.image_path) : null,
+      audio_url: m.message_type === "audio" ? await arifChatSignedImage(m.image_path) : null,
       created_at: m.created_at
     })));
 
@@ -2027,7 +2174,7 @@ app.post("/api/chat/conversations/:id/media/upload-token", async (req, res) => {
   }
 
   const conversationId = String(req.params.id || "");
-  const mime = String(req.body.mime_type || "");
+  const mime = String(req.body.mime_type || "").split(";")[0].trim().toLowerCase();
   const size = Number(req.body.file_size);
 
   const types = {
@@ -2036,7 +2183,8 @@ app.post("/api/chat/conversations/:id/media/upload-token", async (req, res) => {
     "image/webp": "webp",
     "video/mp4": "mp4",
     "video/quicktime": "mov",
-    "video/webm": "webm"
+    "video/webm": "webm",
+    "audio/webm": "webm"
   };
 
   if (!/^[0-9]+$/.test(conversationId) ||
@@ -2135,7 +2283,7 @@ app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
 
   const conversationId = String(req.params.id || "");
   const path = String(req.body.path || "");
-  const mime = String(req.body.mime_type || "");
+  const mime = String(req.body.mime_type || "").split(";")[0].trim().toLowerCase();
   const size = Number(req.body.file_size);
 
   const types = {
@@ -2144,7 +2292,8 @@ app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
     "image/webp": "webp",
     "video/mp4": "mp4",
     "video/quicktime": "mov",
-    "video/webm": "webm"
+    "video/webm": "webm",
+    "audio/webm": "webm"
   };
 
   if (!/^[0-9]+$/.test(conversationId) ||
@@ -2231,7 +2380,8 @@ app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
       });
     }
 
-    const messageType = mime.startsWith("video/") ? "video" : "image";
+    const messageType = mime.startsWith("audio/") ? "audio" :
+      mime.startsWith("video/") ? "video" : "image";
     const disappearingSeconds = Number(conversation.disappearing_seconds || 0);
 
     const r = await fetch(base + "/rest/v1/chat_messages", {
@@ -2310,6 +2460,7 @@ app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
         message_type: messageType,
         image_url: messageType === "image" ? signedUrl : null,
         video_url: messageType === "video" ? signedUrl : null,
+        audio_url: messageType === "audio" ? signedUrl : null,
         created_at: message.created_at
       } : null
     });
@@ -2909,473 +3060,6 @@ app.get("/api/chat/conversations/:id/presence", async (req, res) => {
 
 /* END ARIF_CHAT_PRESENCE_API_V1 */
 
-/* ARIF_AWARENESS_API_V1 */
-
-async function arifAwarenessSignedMedia(path) {
-  const { base, key } = marketConfig();
-  const objectPath = String(path || "").split("/").map(encodeURIComponent).join("/");
-  const r = await fetch(
-    base + "/storage/v1/object/sign/awareness-media/" + objectPath,
-    {
-      method: "POST",
-      headers: {
-        apikey: key,
-        Authorization: "Bearer " + key,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ expiresIn: 3600 })
-    }
-  );
-  if (!r.ok) return null;
-  const data = await r.json();
-  const signed = String(data.signedURL || data.signedUrl || "");
-  if (!signed) return null;
-  if (/^https?:\/\//i.test(signed)) return signed;
-  return base + "/storage/v1" + (signed.startsWith("/") ? signed : "/" + signed);
-}
-
-app.get("/api/awareness/posts", async (req, res) => {
-  try {
-    const { base, key } = marketConfig();
-    const q = new URLSearchParams({
-      select: "id,user_id,content,category,media_type,media_path,media2_type,media2_path,created_at,price,price_currency",
-      order: "created_at.desc",
-      limit: "100"
-    });
-    const r = await fetch(base + "/rest/v1/awareness_posts?" + q, {
-      headers: { apikey: key, Authorization: "Bearer " + key }
-    });
-    if (!r.ok) throw new Error("awareness_posts_read_failed");
-
-    const rows = await r.json();
-
-    const authorIds = [...new Set(
-      (Array.isArray(rows) ? rows : [])
-        .map(post => String(post.user_id))
-        .filter(Boolean)
-    )];
-
-    const phoneByUserId = new Map();
-
-    if (authorIds.length) {
-      const usersQuery = new URLSearchParams({
-        select: "id,phone",
-        id: "in.(" + authorIds.join(",") + ")"
-      });
-
-      const usersResponse = await fetch(
-        base + "/rest/v1/app_users?" + usersQuery,
-        { headers: { apikey: key, Authorization: "Bearer " + key } }
-      );
-
-      if (usersResponse.ok) {
-        const users = await usersResponse.json();
-        for (const u of users) {
-          if (u.phone) phoneByUserId.set(String(u.id), String(u.phone));
-        }
-      }
-    }
-
-    let currentUserId = null;
-    try {
-      const session = marketSession(req);
-      if (session) {
-        const currentUser = await marketUser(session.email);
-        if (currentUser) currentUserId = String(currentUser.id);
-      }
-    } catch (_) {}
-
-    const posts = await Promise.all((Array.isArray(rows) ? rows : []).map(async post => ({
-      id: post.id,
-      user_id: post.user_id,
-      is_owner: currentUserId !== null && currentUserId === String(post.user_id),
-      author: phoneByUserId.get(String(post.user_id)) || "شماره ثبت نشده",
-      content: post.content || "",
-      category: post.category || null,
-      media_type: post.media_type || "text",
-      media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
-      media2_type: post.media2_type || null,
-      media2_url: post.media2_path ? await arifAwarenessSignedMedia(post.media2_path) : null,
-      price: post.price == null ? null : Number(post.price),
-      price_currency: post.price_currency || null,
-      created_at: post.created_at
-    })));
-
-    return res.json({
-      success: true,
-      posts
-    });
-  } catch (e) {
-    console.error("AWARENESS_LIST_ERROR:", String(e.message || e).slice(0, 150));
-    return res.status(503).json({
-      success: false,
-      message: "دریافت پست‌های آگاهی ناموفق بود"
-    });
-  }
-});
-
-app.post("/api/awareness/posts", async (req, res) => {
-  const uploadedPaths = [];
-
-  const cleanupUploads = async (base, key) => {
-    for (const path of uploadedPaths) {
-      try {
-        const objectPath = path.split("/").map(encodeURIComponent).join("/");
-        await fetch(base + "/storage/v1/object/awareness-media/" + objectPath, {
-          method: "DELETE",
-          headers: { apikey: key, Authorization: "Bearer " + key }
-        });
-      } catch (_) {}
-    }
-  };
-
-  try {
-    const session = marketSession(req);
-    if (!session) {
-      return res.status(401).json({
-        success: false,
-        message: "ابتدا وارد حساب شوید"
-      });
-    }
-
-    const user = await marketUser(session.email);
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "حساب کاربری پیدا نشد"
-      });
-    }
-
-    const content = String(req.body.content || "").trim();
-    const category = String(req.body.category || "").trim();
-    const allowedCategories = ["موبایل", "خودرو، موتر و موتورسیکلت", "کسب‌وکار و خدمات"];
-    if (!allowedCategories.includes(category)) {
-      return res.status(400).json({
-        success: false,
-        message: "دسته‌بندی آگاهی معتبر نیست"
-      });
-    }
-    const rawPrice = req.body.price;
-    const priceCurrency = String(req.body.price_currency || "").trim().toUpperCase();
-    let price = null;
-
-    if (content.length > 5000) {
-      return res.status(400).json({
-        success: false,
-        message: "متن پست نباید بیشتر از ۵۰۰۰ حرف باشد"
-      });
-    }
-
-    if (rawPrice !== undefined && rawPrice !== null && String(rawPrice).trim() !== "") {
-      price = Number(rawPrice);
-      if (!Number.isFinite(price) || price <= 0 || price > 999999999999) {
-        return res.status(400).json({
-          success: false,
-          message: "قیمت باید عددی بزرگ‌تر از صفر باشد"
-        });
-      }
-      if (!["AFN", "TOMAN"].includes(priceCurrency)) {
-        return res.status(400).json({
-          success: false,
-          message: "واحد قیمت را افغانی یا تومان انتخاب کنید"
-        });
-      }
-    }
-
-    const dataUrls = [
-      String(req.body.media_data || ""),
-      String(req.body.media2_data || "")
-    ].filter(Boolean);
-
-    if (!content && dataUrls.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "متن یا عکس یا ویدیو وارد کنید"
-      });
-    }
-
-    if (dataUrls.length > 2) {
-      return res.status(400).json({
-        success: false,
-        message: "حداکثر دو فایل می‌توانید انتخاب کنید"
-      });
-    }
-
-    const extByMime = {
-      "image/jpeg": "jpg",
-      "image/png": "png",
-      "image/webp": "webp",
-      "video/mp4": "mp4",
-      "video/quicktime": "mov",
-      "video/webm": "webm"
-    };
-
-    const mediaItems = [];
-    for (const dataUrl of dataUrls) {
-      const match = dataUrl.match(/^data:(image\/(?:jpeg|png|webp)|video\/(?:mp4|quicktime|webm));base64,([A-Za-z0-9+/=\r\n]+)$/);
-      if (!match) {
-        return res.status(400).json({
-          success: false,
-          message: "نوع فایل پشتیبانی نمی‌شود"
-        });
-      }
-
-      const mime = match[1];
-      const buffer = Buffer.from(match[2], "base64");
-
-      if (!buffer.length || buffer.length > 2500000) {
-        return res.status(400).json({
-          success: false,
-          message: "حجم هر عکس یا ویدیو باید حداکثر ۲٫۵ مگابایت باشد"
-        });
-      }
-
-      mediaItems.push({
-        type: mime.startsWith("image/") ? "image" : "video",
-        mime,
-        buffer,
-        ext: extByMime[mime]
-      });
-    }
-
-    if (mediaItems.length === 2 &&
-        mediaItems[0].type === mediaItems[1].type) {
-      return res.status(400).json({
-        success: false,
-        message: "باید یک عکس و یک ویدیو انتخاب کنید"
-      });
-    }
-
-    // اگر هر دو فایل وجود دارند، ترتیب ذخیره همیشه عکس سپس ویدیو است.
-    mediaItems.sort((a, b) => a.type === "image" ? -1 : 1);
-
-    const { base, key } = marketConfig();
-    const crypto = require("crypto");
-
-    for (const item of mediaItems) {
-      const mediaPath = "awareness/" + user.id + "/" +
-        crypto.randomUUID() + "." + item.ext;
-      const objectPath = mediaPath.split("/").map(encodeURIComponent).join("/");
-
-      const upload = await fetch(
-        base + "/storage/v1/object/awareness-media/" + objectPath,
-        {
-          method: "POST",
-          headers: {
-            apikey: key,
-            Authorization: "Bearer " + key,
-            "Content-Type": item.mime,
-            "x-upsert": "false"
-          },
-          body: item.buffer
-        }
-      );
-
-      if (!upload.ok) {
-        const detail = await upload.text().catch(() => "");
-        console.error("AWARENESS_UPLOAD_ERROR:", upload.status, detail.slice(0, 200));
-        await cleanupUploads(base, key);
-        return res.status(503).json({
-          success: false,
-          message: "ذخیره عکس یا ویدیو ناموفق بود؛ تنظیمات باکت را بررسی کنید"
-        });
-      }
-
-      item.path = mediaPath;
-      uploadedPaths.push(mediaPath);
-    }
-
-    const first = mediaItems[0] || null;
-    const second = mediaItems[1] || null;
-
-    const insert = await fetch(base + "/rest/v1/awareness_posts", {
-      method: "POST",
-      headers: {
-        apikey: key,
-        Authorization: "Bearer " + key,
-        "Content-Type": "application/json",
-        Prefer: "return=representation"
-      },
-      body: JSON.stringify([{
-        user_id: user.id,
-        content,
-        category,
-        media_type: first ? first.type : "text",
-        media_path: first ? first.path : null,
-        media2_type: second ? second.type : null,
-        media2_path: second ? second.path : null,
-        price,
-        price_currency: price === null ? null : priceCurrency
-      }])
-    });
-
-    if (!insert.ok) {
-      const detail = await insert.text().catch(() => "");
-      console.error("AWARENESS_INSERT_ERROR:", insert.status, detail.slice(0, 200));
-      await cleanupUploads(base, key);
-      return res.status(503).json({
-        success: false,
-        message: "ذخیره پست در پایگاه داده ناموفق بود"
-      });
-    }
-
-    const rows = await insert.json();
-    const post = Array.isArray(rows) ? rows[0] : null;
-
-    let authorPhone = null;
-    if (post && user && user.id) {
-      const authorQuery = new URLSearchParams({
-        select: "phone",
-        id: "eq." + user.id,
-        limit: "1"
-      });
-      const authorResponse = await fetch(
-        base + "/rest/v1/app_users?" + authorQuery,
-        { headers: { apikey: key, Authorization: "Bearer " + key } }
-      );
-      if (authorResponse.ok) {
-        const authorRows = await authorResponse.json();
-        authorPhone = authorRows[0]?.phone || null;
-      }
-    }
-
-    return res.status(201).json({
-      success: true,
-      post: post ? {
-        id: post.id,
-        user_id: post.user_id,
-        author: authorPhone || "شماره ثبت نشده",
-        content: post.content || "",
-        category: post.category || null,
-        media_type: post.media_type || "text",
-        media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
-        media2_type: post.media2_type || null,
-        media2_url: post.media2_path ? await arifAwarenessSignedMedia(post.media2_path) : null,
-        price: post.price == null ? null : Number(post.price),
-        price_currency: post.price_currency || null,
-        created_at: post.created_at
-      } : null
-    });
-  } catch (e) {
-    try {
-      const { base, key } = marketConfig();
-      await cleanupUploads(base, key);
-    } catch (_) {}
-    console.error("AWARENESS_CREATE_ERROR:", String(e.message || e).slice(0, 180));
-    return res.status(503).json({
-      success: false,
-      message: "ثبت پست آگاهی ناموفق بود"
-    });
-  }
-});
-
-app.delete("/api/awareness/posts/:id", async (req, res) => {
-  try {
-    const session = marketSession(req);
-    if (!session) {
-      return res.status(401).json({
-        success: false,
-        message: "برای حذف آگاهی ابتدا وارد حساب شوید"
-      });
-    }
-
-    const user = await marketUser(session.email);
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "حساب کاربری پیدا نشد"
-      });
-    }
-
-    const postId = String(req.params.id || "").trim();
-    if (!postId || postId.length > 100) {
-      return res.status(400).json({ success: false, message: "شناسه آگاهی نامعتبر است" });
-    }
-
-    const { base, key } = marketConfig();
-    const lookup = new URLSearchParams({
-      select: "id,user_id,media_path,media2_path",
-      id: "eq." + postId,
-      limit: "1"
-    });
-
-    const found = await fetch(base + "/rest/v1/awareness_posts?" + lookup, {
-      headers: { apikey: key, Authorization: "Bearer " + key }
-    });
-
-    if (!found.ok) throw new Error("awareness_post_lookup_failed");
-
-    const rows = await found.json();
-    const post = Array.isArray(rows) ? rows[0] : null;
-
-    if (!post) {
-      return res.status(404).json({ success: false, message: "آگاهی پیدا نشد یا قبلاً حذف شده است" });
-    }
-
-    if (String(post.user_id) !== String(user.id)) {
-      return res.status(403).json({
-        success: false,
-        message: "شما فقط می‌توانید آگاهی خودتان را حذف کنید"
-      });
-    }
-
-    const deleteQuery = new URLSearchParams({
-      id: "eq." + String(post.id),
-      user_id: "eq." + String(user.id)
-    });
-
-    const deleted = await fetch(base + "/rest/v1/awareness_posts?" + deleteQuery, {
-      method: "DELETE",
-      headers: {
-        apikey: key,
-        Authorization: "Bearer " + key,
-        Prefer: "return=representation"
-      }
-    });
-
-    if (!deleted.ok) {
-      const detail = await deleted.text().catch(() => "");
-      console.error("AWARENESS_DELETE_ERROR:", deleted.status, detail.slice(0, 150));
-      throw new Error("awareness_post_delete_failed");
-    }
-
-    const deletedRows = await deleted.json().catch(() => []);
-    if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "آگاهی حذف نشد؛ لطفاً دوباره تلاش کنید"
-      });
-    }
-
-    for (const mediaPath of [post.media_path, post.media2_path].filter(Boolean)) {
-      try {
-        const objectPath = String(mediaPath).split("/").map(encodeURIComponent).join("/");
-        const mediaDelete = await fetch(
-          base + "/storage/v1/object/awareness-media/" + objectPath,
-          {
-            method: "DELETE",
-            headers: { apikey: key, Authorization: "Bearer " + key }
-          }
-        );
-        if (!mediaDelete.ok) {
-          console.error("AWARENESS_MEDIA_DELETE_ERROR:", mediaDelete.status);
-        }
-      } catch (mediaError) {
-        console.error("AWARENESS_MEDIA_DELETE_ERROR:", String(mediaError.message || mediaError).slice(0, 120));
-      }
-    }
-
-    return res.json({ success: true, message: "آگاهی حذف شد" });
-  } catch (e) {
-    console.error("AWARENESS_DELETE_ERROR:", String(e.message || e).slice(0, 160));
-    return res.status(503).json({
-      success: false,
-      message: "حذف آگاهی ناموفق بود؛ لطفاً دوباره تلاش کنید"
-    });
-  }
-});
-
-/* END ARIF_AWARENESS_API_V1 */
 
 
 require("./otp")(app);
