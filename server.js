@@ -2938,7 +2938,7 @@ app.get("/api/awareness/posts", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const q = new URLSearchParams({
-      select: "id,user_id,content,media_type,media_path,media2_type,media2_path,created_at,price,price_currency",
+      select: "id,user_id,content,category,media_type,media_path,media2_type,media2_path,created_at,price,price_currency",
       order: "created_at.desc",
       limit: "100"
     });
@@ -2991,6 +2991,7 @@ app.get("/api/awareness/posts", async (req, res) => {
       is_owner: currentUserId !== null && currentUserId === String(post.user_id),
       author: phoneByUserId.get(String(post.user_id)) || "شماره ثبت نشده",
       content: post.content || "",
+      category: post.category || null,
       media_type: post.media_type || "text",
       media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
       media2_type: post.media2_type || null,
@@ -3046,6 +3047,14 @@ app.post("/api/awareness/posts", async (req, res) => {
     }
 
     const content = String(req.body.content || "").trim();
+    const category = String(req.body.category || "").trim();
+    const allowedCategories = ["موبایل", "خودرو، موتر و موتورسیکلت", "کسب‌وکار و خدمات"];
+    if (!allowedCategories.includes(category)) {
+      return res.status(400).json({
+        success: false,
+        message: "دسته‌بندی آگاهی معتبر نیست"
+      });
+    }
     const rawPrice = req.body.price;
     const priceCurrency = String(req.body.price_currency || "").trim().toUpperCase();
     let price = null;
@@ -3190,6 +3199,7 @@ app.post("/api/awareness/posts", async (req, res) => {
       body: JSON.stringify([{
         user_id: user.id,
         content,
+        category,
         media_type: first ? first.type : "text",
         media_path: first ? first.path : null,
         media2_type: second ? second.type : null,
@@ -3236,6 +3246,7 @@ app.post("/api/awareness/posts", async (req, res) => {
         user_id: post.user_id,
         author: authorPhone || "شماره ثبت نشده",
         content: post.content || "",
+        category: post.category || null,
         media_type: post.media_type || "text",
         media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
         media2_type: post.media2_type || null,
