@@ -1367,6 +1367,15 @@ app.delete("/api/marketplace/saved/:id", async (req, res) => {
 app.get("/api/job-ads", async (req, res) => {
   res.set("Cache-Control", "no-store");
   try {
+    const auth = String(req.headers.authorization || "");
+    const session = auth ? marketSession(req) : null;
+    let myUserId = null;
+
+    if (session) {
+      const user = await marketUser(session.email);
+      if (user) myUserId = user.id;
+    }
+
     const { base, key } = marketConfig();
     const q = new URLSearchParams({
       select: "id,user_id,ad_type,title,description,city,address,salary,phone,contact_name,created_at",
@@ -1382,7 +1391,12 @@ app.get("/api/job-ads", async (req, res) => {
       return res.status(503).json({ success: false, message: "دریافت آگهی‌های کار ناموفق بود" });
     }
 
-    return res.json({ success: true, ads: await r.json() });
+    const rows = await r.json();
+    const ads = rows.map(ad => ({
+      ...ad,
+      is_mine: myUserId !== null && String(ad.user_id) === String(myUserId)
+    }));
+    return res.json({ success: true, ads });
   } catch (e) {
     console.error("JOB_ADS_LIST_ERROR:", String(e.message || e).slice(0, 150));
     return res.status(503).json({ success: false, message: "اتصال آگهی کار برقرار نشد" });
