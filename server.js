@@ -2492,6 +2492,93 @@ app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
 });
 
 
+
+/* ARIF_CHAT_DELETE_MESSAGE_API_V1 */
+app.delete("/api/chat/conversations/:id/messages/:messageId", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const messageId = String(req.params.messageId || "");
+
+  if (!/^[0-9]+$/.test(conversationId) || !/^[0-9]+$/.test(messageId)) {
+    return res.status(400).json({ success: false, message: "شناسه پیام معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const params = new URLSearchParams({
+      select: "id,sender_id,image_path,message_type",
+      id: "eq." + messageId,
+      conversation_id: "eq." + conversationId,
+      sender_id: "eq." + me.id
+    });
+
+    const deleted = await fetch(base + "/rest/v1/chat_messages?" + params, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=representation"
+      }
+    });
+
+    if (!deleted.ok) {
+      console.error("ARIF_CHAT_DELETE_DB_ERROR:", deleted.status);
+      return res.status(503).json({ success: false, message: "حذف پیام ناموفق بود" });
+    }
+
+    const rows = await deleted.json();
+    const message = Array.isArray(rows) ? rows[0] : null;
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        message: "پیام پیدا نشد یا متعلق به شما نیست"
+      });
+    }
+
+    if (message.image_path) {
+      const prefix = conversationId + "/" + me.id + "/";
+      if (String(message.image_path).startsWith(prefix)) {
+        const objectPath = message.image_path.split("/").map(encodeURIComponent).join("/");
+        const storageDelete = await fetch(
+          base + "/storage/v1/object/chat-images/" + objectPath,
+          {
+            method: "DELETE",
+            headers: {
+              apikey: key,
+              Authorization: "Bearer " + key
+            }
+          }
+        );
+
+        if (!storageDelete.ok) {
+          console.error("ARIF_CHAT_DELETE_STORAGE_ERROR:", storageDelete.status);
+        }
+      }
+    }
+
+    return res.json({ success: true, deleted_id: message.id });
+  } catch (e) {
+    console.error("ARIF_CHAT_DELETE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "حذف پیام ناموفق بود" });
+  }
+});
+
 /* ARIF_CHAT_REPORT_API_V1 */
 app.post("/api/chat/conversations/:id/report", async (req, res) => {
   const session = marketSession(req);
