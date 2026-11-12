@@ -3475,6 +3475,247 @@ async function arifCleanupExpiredChatMessages() {
 }
 /* END ARIF_CHAT_EXPIRY_CLEANUP_V1 */
 
+
+/* ARIF_CHAT_CALL_SIGNAL_API_V1 */
+
+const ARIF_CALL_SIGNAL_TYPES = [
+  "offer", "answer", "candidate", "reject", "hangup", "busy"
+];
+
+app.post("/api/chat/calls/:id/signals", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      message: "ابتدا وارد حساب شوید"
+    });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({
+      success: false,
+      message: "شناسه گفتگو معتبر نیست"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+
+    if (!me) {
+      return res.status(404).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const conversation = await arifChatConversation(
+      conversationId, me.id
+    );
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "گفتگو پیدا نشد"
+      });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "تماس با این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    const body = req.body || {};
+    const callId = String(body.callId || "");
+    const signalType = String(body.signalType || "");
+    const payload = body.payload == null ? {} : body.payload;
+
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(callId)) {
+      return res.status(400).json({
+        success: false,
+        message: "شناسه تماس معتبر نیست"
+      });
+    }
+
+    if (!ARIF_CALL_SIGNAL_TYPES.includes(signalType)) {
+      return res.status(400).json({
+        success: false,
+        message: "نوع سیگنال معتبر نیست"
+      });
+    }
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({
+        success: false,
+        message: "اطلاعات تماس معتبر نیست"
+      });
+    }
+
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 60000) {
+      return res.status(413).json({
+        success: false,
+        message: "حجم اطلاعات تماس بیش از حد مجاز است"
+      });
+    }
+
+    const insert = await fetch(base + "/rest/v1/chat_call_signals", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        call_id: callId,
+        sender_user_id: String(me.id),
+        recipient_user_id: String(otherId),
+        signal_type: signalType,
+        payload
+      })
+    });
+
+    if (!insert.ok) {
+      console.error(
+        "ARIF_CALL_SIGNAL_INSERT_ERROR:",
+        insert.status,
+        (await insert.text()).slice(0, 200)
+      );
+      return res.status(503).json({
+        success: false,
+        message: "ارسال سیگنال تماس ناموفق بود"
+      });
+    }
+
+    const rows = await insert.json();
+    return res.json({
+      success: true,
+      signal: Array.isArray(rows) ? rows[0] : null
+    });
+
+  } catch (e) {
+    console.error(
+      "ARIF_CALL_SIGNAL_POST_ERROR:",
+      String(e.message || e).slice(0, 150)
+    );
+    return res.status(503).json({
+      success: false,
+      message: "خطا در ارسال سیگنال تماس"
+    });
+  }
+});
+
+app.get("/api/chat/calls/:id/signals", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      message: "ابتدا وارد حساب شوید"
+    });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const after = String(req.query.after || "0");
+  const callId = String(req.query.callId || "");
+
+  if (!/^[0-9]+$/.test(conversationId) ||
+      !/^[0-9]{1,18}$/.test(after)) {
+    return res.status(400).json({
+      success: false,
+      message: "درخواست تماس معتبر نیست"
+    });
+  }
+
+  if (callId && !/^[A-Za-z0-9_-]{8,100}$/.test(callId)) {
+    return res.status(400).json({
+      success: false,
+      message: "شناسه تماس معتبر نیست"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+
+    if (!me) {
+      return res.status(404).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const conversation = await arifChatConversation(
+      conversationId, me.id
+    );
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "گفتگو پیدا نشد"
+      });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "دسترسی تماس مسدود است"
+      });
+    }
+
+    const q = new URLSearchParams({
+      select: "id,call_id,sender_user_id,signal_type,payload,created_at",
+      conversation_id: "eq." + conversationId,
+      recipient_user_id: "eq." + String(me.id),
+      id: "gt." + after,
+      created_at: "gt." + new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      order: "id.asc",
+      limit: "100"
+    });
+
+    if (callId) q.set("call_id", "eq." + callId);
+
+    const r = await fetch(
+      base + "/rest/v1/chat_call_signals?" + q,
+      { headers: { apikey: key, Authorization: "Bearer " + key } }
+    );
+
+    if (!r.ok) {
+      console.error("ARIF_CALL_SIGNAL_READ_ERROR:", r.status);
+      return res.status(503).json({
+        success: false,
+        message: "دریافت سیگنال تماس ناموفق بود"
+      });
+    }
+
+    const signals = await r.json();
+    return res.json({
+      success: true,
+      signals: Array.isArray(signals) ? signals : []
+    });
+
+  } catch (e) {
+    console.error(
+      "ARIF_CALL_SIGNAL_GET_ERROR:",
+      String(e.message || e).slice(0, 150)
+    );
+    return res.status(503).json({
+      success: false,
+      message: "خطا در دریافت سیگنال تماس"
+    });
+  }
+});
+
+/* END ARIF_CHAT_CALL_SIGNAL_API_V1 */
+
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", () => {
