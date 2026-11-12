@@ -1949,8 +1949,37 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       });
     }
 
+
+    // ثبت زمان مشاهده پیام‌های طرف مقابل
+    const readQuery = new URLSearchParams({
+      conversation_id: "eq." + conversationId,
+      sender_id: "neq." + String(me.id),
+      read_at: "is.null"
+    });
+
+    try {
+      const markRead = await fetch(
+        base + "/rest/v1/chat_messages?" + readQuery,
+        {
+          method: "PATCH",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key,
+            "Content-Type": "application/json",
+            Prefer: "return=minimal"
+          },
+          body: JSON.stringify({ read_at: new Date().toISOString() })
+        }
+      );
+      if (!markRead.ok) {
+        console.error("ARIF_CHAT_MARK_READ_ERROR:", await markRead.text());
+      }
+    } catch (readError) {
+      console.error("ARIF_CHAT_MARK_READ_ERROR:", String(readError.message || readError));
+    }
+
     const q = new URLSearchParams({
-      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at",
+      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at,read_at",
       conversation_id: "eq." + conversationId,
       or: "(expires_at.is.null,expires_at.gt." + new Date().toISOString() + ")",
       order: "created_at.asc",
@@ -1971,7 +2000,8 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       image_url: m.message_type === "image" ? await arifChatSignedImage(m.image_path) : null,
       video_url: m.message_type === "video" ? await arifChatSignedImage(m.image_path) : null,
       audio_url: m.message_type === "audio" ? await arifChatSignedImage(m.image_path) : null,
-      created_at: m.created_at
+      created_at: m.created_at,
+      read_at: m.read_at || null
     })));
 
     return res.json({ success: true, current_user_id: me.id, messages: result });
