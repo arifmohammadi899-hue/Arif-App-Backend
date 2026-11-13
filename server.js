@@ -1361,6 +1361,166 @@ app.delete("/api/marketplace/saved/:id", async (req, res) => {
 });
 /* END SAVED_MARKETPLACE_API_V1 */
 
+/* ARIF_JOB_ADS_API_V1 */
+
+// نمایش آگهی‌های استخدام و جویای کار
+app.get("/api/job-ads", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const auth = String(req.headers.authorization || "");
+    const session = auth ? marketSession(req) : null;
+    let myUserId = null;
+
+    if (session) {
+      const user = await marketUser(session.email);
+      if (user) myUserId = user.id;
+    }
+
+    const { base, key } = marketConfig();
+    const q = new URLSearchParams({
+      select: "id,user_id,ad_type,title,description,city,address,salary,phone,contact_name,created_at",
+      order: "created_at.desc"
+    });
+
+    const r = await fetch(base + "/rest/v1/job_ads?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) {
+      console.error("JOB_ADS_LIST_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "دریافت آگهی‌های کار ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    const ads = rows.map(ad => ({
+      ...ad,
+      is_mine: myUserId !== null && String(ad.user_id) === String(myUserId)
+    }));
+    return res.json({ success: true, ads });
+  } catch (e) {
+    console.error("JOB_ADS_LIST_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال آگهی کار برقرار نشد" });
+  }
+});
+
+// ثبت آگهی استخدام یا جویای کار
+app.post("/api/job-ads", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const body = req.body || {};
+  const adType = String(body.ad_type || "");
+  const title = String(body.title || "").trim().slice(0, 120);
+  const description = String(body.description || "").trim().slice(0, 3000);
+  const city = String(body.city || "").trim().slice(0, 100);
+  const address = String(body.address || "").trim().slice(0, 250);
+  const salary = String(body.salary || "").trim().slice(0, 100);
+  const phone = String(body.phone || "").trim().slice(0, 40);
+  const contactName = String(body.contact_name || "").trim().slice(0, 100);
+
+  if (!["hire", "seeking"].includes(adType)) {
+    return res.status(400).json({ success: false, message: "نوع آگهی معتبر نیست" });
+  }
+  if (!title || !city || !phone) {
+    return res.status(400).json({ success: false, message: "عنوان، شهر و شماره تماس الزامی است" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const r = await fetch(base + "/rest/v1/job_ads", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        user_id: user.id,
+        ad_type: adType,
+        title,
+        description,
+        city,
+        address,
+        salary,
+        phone,
+        contact_name: contactName
+      })
+    });
+
+    if (!r.ok) {
+      console.error("JOB_ADS_CREATE_ERROR:", r.status, (await r.text()).slice(0, 180));
+      return res.status(503).json({ success: false, message: "ثبت آگهی کار ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    return res.status(201).json({ success: true, ad: rows[0] });
+  } catch (e) {
+    console.error("JOB_ADS_CREATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت آگهی کار ناموفق بود" });
+  }
+});
+
+// حذف آگهی فقط توسط صاحب آن
+app.delete("/api/job-ads/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const id = String(req.params.id || "");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) {
+    return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({
+      id: "eq." + id,
+      user_id: "eq." + user.id
+    });
+
+    const r = await fetch(base + "/rest/v1/job_ads?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=representation"
+      }
+    });
+
+    if (!r.ok) {
+      console.error("JOB_ADS_DELETE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "حذف آگهی کار ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "آگهی پیدا نشد یا متعلق به شما نیست" });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("JOB_ADS_DELETE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "حذف آگهی کار ناموفق بود" });
+  }
+});
+
+/* END ARIF_JOB_ADS_API_V1 */
+
+
 /* END MARKETPLACE_API_V1 */
 
 
@@ -1370,7 +1530,7 @@ app.delete("/api/marketplace/saved/:id", async (req, res) => {
 async function arifChatConversation(conversationId, userId) {
   const { base, key } = marketConfig();
   const q = new URLSearchParams({
-    select: "id,user_one_id,user_two_id",
+    select: "id,user_one_id,user_two_id,disappearing_seconds",
     id: "eq." + conversationId,
     limit: "1"
   });
@@ -1384,6 +1544,35 @@ async function arifChatConversation(conversationId, userId) {
   if (Number(c.user_one_id) !== Number(userId) &&
       Number(c.user_two_id) !== Number(userId)) return null;
   return c;
+}
+
+function arifChatOtherUserId(conversation, userId) {
+  const me = Number(userId);
+  const one = Number(conversation.user_one_id);
+  const two = Number(conversation.user_two_id);
+  if (me === one) return two;
+  if (me === two) return one;
+  return null;
+}
+
+async function arifChatIsBlocked(conversation, userId) {
+  const { base, key } = marketConfig();
+  const otherId = arifChatOtherUserId(conversation, userId);
+  if (!otherId) throw new Error("chat_other_user_not_found");
+
+  const me = Number(userId);
+  const q = new URLSearchParams({
+    select: "id",
+    or: `(and(blocker_id.eq.${me},blocked_user_id.eq.${otherId}),and(blocker_id.eq.${otherId},blocked_user_id.eq.${me}))`,
+    limit: "1"
+  });
+
+  const r = await fetch(base + "/rest/v1/chat_blocks?" + q, {
+    headers: { apikey: key, Authorization: "Bearer " + key }
+  });
+  if (!r.ok) throw new Error("chat_block_lookup_failed");
+  const rows = await r.json();
+  return Array.isArray(rows) && rows.length > 0;
 }
 
 async function arifChatSignedImage(path) {
@@ -1417,7 +1606,9 @@ app.get("/api/chat/conversations", async (req, res) => {
   try {
     const { base, key } = marketConfig();
     const me = await marketUser(session.email);
-    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
 
     const myId = Number(me.id);
     const q = new URLSearchParams({
@@ -1438,12 +1629,12 @@ app.get("/api/chat/conversations", async (req, res) => {
       return res.json({ success: true, conversations: [] });
     }
 
-    const ids = conversations.map(c => String(
+    const ids = [...new Set(conversations.map(c => String(
       Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
-    )).filter(id => /^[0-9]+$/.test(id));
+    )).filter(id => /^[0-9]+$/.test(id)))];
 
     const uq = new URLSearchParams({
-      select: "id,email",
+      select: "id,phone,first_name,surname,username",
       id: "in.(" + ids.join(",") + ")"
     });
     const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
@@ -1452,8 +1643,8 @@ app.get("/api/chat/conversations", async (req, res) => {
     if (!ur.ok) throw new Error("chat_users_read_failed");
 
     const users = await ur.json();
-    const emailById = new Map((Array.isArray(users) ? users : [])
-      .map(u => [String(u.id), String(u.email || "")]));
+    const userById = new Map((Array.isArray(users) ? users : [])
+      .map(u => [String(u.id), u]));
 
     const conversationIds = conversations.map(c => String(c.id));
     const mq = new URLSearchParams({
@@ -1480,11 +1671,17 @@ app.get("/api/chat/conversations", async (req, res) => {
         const otherId = String(
           Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
         );
+        const other = userById.get(otherId) || {};
         const last = lastByConversation.get(String(c.id));
+        const otherName = [other.first_name, other.surname]
+          .filter(Boolean).join(" ").trim() || String(other.username || "");
+
         return {
           id: c.id,
           conversation_type: c.conversation_type,
-          other_user_email: emailById.get(otherId) || "کاربر",
+          other_user_id: otherId,
+          other_user_name: otherName,
+          other_user_phone: String(other.phone || ""),
           last_message: last
             ? (last.message_type === "image" ? "🖼️ عکس" : String(last.message_text || "").slice(0, 120))
             : "هنوز پیامی ارسال نشده",
@@ -1494,7 +1691,10 @@ app.get("/api/chat/conversations", async (req, res) => {
     });
   } catch (e) {
     console.error("ARIF_CHAT_LIST_ERROR:", String(e.message || e).slice(0, 150));
-    return res.status(503).json({ success: false, message: "دریافت صندوق پیام ناموفق بود" });
+    return res.status(503).json({
+      success: false,
+      message: "دریافت صندوق پیام ناموفق بود"
+    });
   }
 });
 
@@ -1742,9 +1942,46 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
-    const q = new URLSearchParams({
-      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at",
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "این گفتگو در دسترس نیست"
+      });
+    }
+
+
+    // ثبت زمان مشاهده پیام‌های طرف مقابل
+    const readQuery = new URLSearchParams({
       conversation_id: "eq." + conversationId,
+      sender_id: "neq." + String(me.id),
+      read_at: "is.null"
+    });
+
+    try {
+      const markRead = await fetch(
+        base + "/rest/v1/chat_messages?" + readQuery,
+        {
+          method: "PATCH",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key,
+            "Content-Type": "application/json",
+            Prefer: "return=minimal"
+          },
+          body: JSON.stringify({ read_at: new Date().toISOString() })
+        }
+      );
+      if (!markRead.ok) {
+        console.error("ARIF_CHAT_MARK_READ_ERROR:", await markRead.text());
+      }
+    } catch (readError) {
+      console.error("ARIF_CHAT_MARK_READ_ERROR:", String(readError.message || readError));
+    }
+
+    const q = new URLSearchParams({
+      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at,read_at",
+      conversation_id: "eq." + conversationId,
+      or: "(expires_at.is.null,expires_at.gt." + new Date().toISOString() + ")",
       order: "created_at.asc",
       limit: "200"
     });
@@ -1761,7 +1998,10 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       message_type: m.message_type,
       message_text: m.message_text,
       image_url: m.message_type === "image" ? await arifChatSignedImage(m.image_path) : null,
-      created_at: m.created_at
+      video_url: m.message_type === "video" ? await arifChatSignedImage(m.image_path) : null,
+      audio_url: m.message_type === "audio" ? await arifChatSignedImage(m.image_path) : null,
+      created_at: m.created_at,
+      read_at: m.read_at || null
     })));
 
     return res.json({ success: true, current_user_id: me.id, messages: result });
@@ -1796,6 +2036,13 @@ app.post("/api/chat/conversations/:id/messages", async (req, res) => {
       return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال پیام به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
     const r = await fetch(base + "/rest/v1/chat_messages", {
       method: "POST",
       headers: {
@@ -1809,7 +2056,10 @@ app.post("/api/chat/conversations/:id/messages", async (req, res) => {
         sender_id: me.id,
         message_type: "text",
         message_text: messageText,
-        image_path: null
+        image_path: null,
+        expires_at: Number(conversation.disappearing_seconds || 0) > 0
+          ? new Date(Date.now() + Number(conversation.disappearing_seconds) * 1000).toISOString()
+          : null
       })
     });
     if (!r.ok) {
@@ -1867,6 +2117,13 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
       return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال تصویر به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
     const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[match[1]];
     const imagePath = conversationId + "/" + me.id + "/" + require("crypto").randomUUID() + "." + ext;
     const storageUrl = base + "/storage/v1/object/chat-images/" +
@@ -1904,7 +2161,10 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
         sender_id: me.id,
         message_type: "image",
         message_text: null,
-        image_path: imagePath
+        image_path: imagePath,
+        expires_at: Number(conversation.disappearing_seconds || 0) > 0
+          ? new Date(Date.now() + Number(conversation.disappearing_seconds) * 1000).toISOString()
+          : null
       })
     });
 
@@ -1949,250 +2209,226 @@ app.post("/api/chat/conversations/:id/images", async (req, res) => {
 
 
 
-/* ARIF_AWARENESS_API_V1 */
 
-async function arifAwarenessSignedMedia(path) {
-  const { base, key } = marketConfig();
-  const objectPath = String(path || "").split("/").map(encodeURIComponent).join("/");
-  const r = await fetch(
-    base + "/storage/v1/object/sign/awareness-media/" + objectPath,
-    {
-      method: "POST",
-      headers: {
-        apikey: key,
-        Authorization: "Bearer " + key,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ expiresIn: 3600 })
-    }
-  );
-  if (!r.ok) return null;
-  const data = await r.json();
-  const signed = String(data.signedURL || data.signedUrl || "");
-  if (!signed) return null;
-  if (/^https?:\/\//i.test(signed)) return signed;
-  return base + "/storage/v1" + (signed.startsWith("/") ? signed : "/" + signed);
-}
 
-app.get("/api/awareness/posts", async (req, res) => {
+app.post("/api/chat/conversations/:id/media/upload-token", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const mime = String(req.body.mime_type || "").split(";")[0].trim().toLowerCase();
+  const size = Number(req.body.file_size);
+
+  const types = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm",
+    "audio/webm": "webm"
+  };
+
+  if (!/^[0-9]+$/.test(conversationId) ||
+      !types[mime] ||
+      !Number.isSafeInteger(size) ||
+      size < 1 || size > 52428800) {
+    return res.status(400).json({
+      success: false,
+      message: "نوع یا حجم فایل معتبر نیست؛ حداکثر ۵۰ مگابایت"
+    });
+  }
+
   try {
     const { base, key } = marketConfig();
-    const q = new URLSearchParams({
-      select: "id,user_id,content,media_type,media_path,media2_type,media2_path,created_at,price,price_currency",
-      order: "created_at.desc",
-      limit: "100"
-    });
-    const r = await fetch(base + "/rest/v1/awareness_posts?" + q, {
-      headers: { apikey: key, Authorization: "Bearer " + key }
-    });
-    if (!r.ok) throw new Error("awareness_posts_read_failed");
+    const publicKey = process.env.SUPABASE_PUBLISHABLE_KEY;
+    if (!publicKey) throw new Error("supabase_publishable_key_missing");
 
-    const rows = await r.json();
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
 
-    let currentUserId = null;
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال رسانه به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const path = conversationId + "/" + me.id + "/" +
+      marketCrypto.randomUUID() + "." + types[mime];
+
+    const objectPath = path.split("/").map(encodeURIComponent).join("/");
+    const signedResponse = await fetch(
+      base + "/storage/v1/object/upload/sign/chat-images/" + objectPath,
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ upsert: false })
+      }
+    );
+
+    if (!signedResponse.ok) {
+      console.error("ARIF_CHAT_TUS_SIGN_ERROR:", signedResponse.status);
+      return res.status(503).json({
+        success: false,
+        message: "صدور مجوز آپلود ناموفق بود"
+      });
+    }
+
+    const signedData = await signedResponse.json();
+    if (!signedData.token) throw new Error("storage_upload_token_missing");
+
+    let storageBase = base;
     try {
-      const session = marketSession(req);
-      if (session) {
-        const currentUser = await marketUser(session.email);
-        if (currentUser) currentUserId = String(currentUser.id);
+      const u = new URL(base);
+      const match = u.hostname.match(/^([^.]+)\.supabase\.co$/i);
+      if (match) {
+        u.hostname = match[1] + ".storage.supabase.co";
+        storageBase = u.origin;
       }
     } catch (_) {}
 
-    const posts = await Promise.all((Array.isArray(rows) ? rows : []).map(async post => ({
-      id: post.id,
-      user_id: post.user_id,
-      is_owner: currentUserId !== null && currentUserId === String(post.user_id),
-      author: "کاربر #" + post.user_id,
-      content: post.content || "",
-      media_type: post.media_type || "text",
-      media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
-      media2_type: post.media2_type || null,
-      media2_url: post.media2_path ? await arifAwarenessSignedMedia(post.media2_path) : null,
-      price: post.price == null ? null : Number(post.price),
-      price_currency: post.price_currency || null,
-      created_at: post.created_at
-    })));
-
     return res.json({
       success: true,
-      posts
+      path,
+      token: signedData.token,
+      tus_endpoint: storageBase + "/storage/v1/upload/resumable",
+      api_key: publicKey,
+      file_size: size,
+      mime_type: mime
     });
   } catch (e) {
-    console.error("AWARENESS_LIST_ERROR:", String(e.message || e).slice(0, 150));
+    console.error("ARIF_CHAT_TUS_TOKEN_ERROR:", String(e.message || e).slice(0, 150));
     return res.status(503).json({
       success: false,
-      message: "دریافت پست‌های آگاهی ناموفق بود"
+      message: "آماده‌سازی آپلود ناموفق بود"
     });
   }
 });
 
-app.post("/api/awareness/posts", async (req, res) => {
-  const uploadedPaths = [];
+app.post("/api/chat/conversations/:id/media/complete", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
 
-  const cleanupUploads = async (base, key) => {
-    for (const path of uploadedPaths) {
-      try {
-        const objectPath = path.split("/").map(encodeURIComponent).join("/");
-        await fetch(base + "/storage/v1/object/awareness-media/" + objectPath, {
-          method: "DELETE",
-          headers: { apikey: key, Authorization: "Bearer " + key }
-        });
-      } catch (_) {}
-    }
+  const conversationId = String(req.params.id || "");
+  const path = String(req.body.path || "");
+  const mime = String(req.body.mime_type || "").split(";")[0].trim().toLowerCase();
+  const size = Number(req.body.file_size);
+
+  const types = {
+    "image/jpeg": "jpg",
+    "image/png": "png",
+    "image/webp": "webp",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm",
+    "audio/webm": "webm"
   };
 
+  if (!/^[0-9]+$/.test(conversationId) ||
+      !types[mime] ||
+      !Number.isSafeInteger(size) ||
+      size < 1 || size > 52428800) {
+    return res.status(400).json({
+      success: false,
+      message: "اطلاعات رسانه معتبر نیست"
+    });
+  }
+
   try {
-    const session = marketSession(req);
-    if (!session) {
-      return res.status(401).json({
-        success: false,
-        message: "ابتدا وارد حساب شوید"
-      });
-    }
-
-    const user = await marketUser(session.email);
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "حساب کاربری پیدا نشد"
-      });
-    }
-
-    const content = String(req.body.content || "").trim();
-    const rawPrice = req.body.price;
-    const priceCurrency = String(req.body.price_currency || "").trim().toUpperCase();
-    let price = null;
-
-    if (content.length > 5000) {
-      return res.status(400).json({
-        success: false,
-        message: "متن پست نباید بیشتر از ۵۰۰۰ حرف باشد"
-      });
-    }
-
-    if (rawPrice !== undefined && rawPrice !== null && String(rawPrice).trim() !== "") {
-      price = Number(rawPrice);
-      if (!Number.isFinite(price) || price <= 0 || price > 999999999999) {
-        return res.status(400).json({
-          success: false,
-          message: "قیمت باید عددی بزرگ‌تر از صفر باشد"
-        });
-      }
-      if (!["AFN", "TOMAN"].includes(priceCurrency)) {
-        return res.status(400).json({
-          success: false,
-          message: "واحد قیمت را افغانی یا تومان انتخاب کنید"
-        });
-      }
-    }
-
-    const dataUrls = [
-      String(req.body.media_data || ""),
-      String(req.body.media2_data || "")
-    ].filter(Boolean);
-
-    if (!content && dataUrls.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "متن یا عکس یا ویدیو وارد کنید"
-      });
-    }
-
-    if (dataUrls.length > 2) {
-      return res.status(400).json({
-        success: false,
-        message: "حداکثر دو فایل می‌توانید انتخاب کنید"
-      });
-    }
-
-    const extByMime = {
-      "image/jpeg": "jpg",
-      "image/png": "png",
-      "image/webp": "webp",
-      "video/mp4": "mp4",
-      "video/quicktime": "mov",
-      "video/webm": "webm"
-    };
-
-    const mediaItems = [];
-    for (const dataUrl of dataUrls) {
-      const match = dataUrl.match(/^data:(image\/(?:jpeg|png|webp)|video\/(?:mp4|quicktime|webm));base64,([A-Za-z0-9+/=\r\n]+)$/);
-      if (!match) {
-        return res.status(400).json({
-          success: false,
-          message: "نوع فایل پشتیبانی نمی‌شود"
-        });
-      }
-
-      const mime = match[1];
-      const buffer = Buffer.from(match[2], "base64");
-
-      if (!buffer.length || buffer.length > 2500000) {
-        return res.status(400).json({
-          success: false,
-          message: "حجم هر عکس یا ویدیو باید حداکثر ۲٫۵ مگابایت باشد"
-        });
-      }
-
-      mediaItems.push({
-        type: mime.startsWith("image/") ? "image" : "video",
-        mime,
-        buffer,
-        ext: extByMime[mime]
-      });
-    }
-
-    if (mediaItems.length === 2 &&
-        mediaItems[0].type === mediaItems[1].type) {
-      return res.status(400).json({
-        success: false,
-        message: "باید یک عکس و یک ویدیو انتخاب کنید"
-      });
-    }
-
-    // اگر هر دو فایل وجود دارند، ترتیب ذخیره همیشه عکس سپس ویدیو است.
-    mediaItems.sort((a, b) => a.type === "image" ? -1 : 1);
-
     const { base, key } = marketConfig();
-    const crypto = require("crypto");
+    const me = await marketUser(session.email);
 
-    for (const item of mediaItems) {
-      const mediaPath = "awareness/" + user.id + "/" +
-        crypto.randomUUID() + "." + item.ext;
-      const objectPath = mediaPath.split("/").map(encodeURIComponent).join("/");
-
-      const upload = await fetch(
-        base + "/storage/v1/object/awareness-media/" + objectPath,
-        {
-          method: "POST",
-          headers: {
-            apikey: key,
-            Authorization: "Bearer " + key,
-            "Content-Type": item.mime,
-            "x-upsert": "false"
-          },
-          body: item.buffer
-        }
-      );
-
-      if (!upload.ok) {
-        const detail = await upload.text().catch(() => "");
-        console.error("AWARENESS_UPLOAD_ERROR:", upload.status, detail.slice(0, 200));
-        await cleanupUploads(base, key);
-        return res.status(503).json({
-          success: false,
-          message: "ذخیره عکس یا ویدیو ناموفق بود؛ تنظیمات باکت را بررسی کنید"
-        });
-      }
-
-      item.path = mediaPath;
-      uploadedPaths.push(mediaPath);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
     }
 
-    const first = mediaItems[0] || null;
-    const second = mediaItems[1] || null;
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
 
-    const insert = await fetch(base + "/rest/v1/awareness_posts", {
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ارسال رسانه به این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const prefix = conversationId + "/" + me.id + "/";
+    const filename = path.startsWith(prefix) ? path.slice(prefix.length) : "";
+
+    if (!/^[0-9a-f-]{36}\.(jpg|png|webp|mp4|mov|webm)$/i.test(filename) ||
+        !filename.toLowerCase().endsWith("." + types[mime])) {
+      return res.status(400).json({
+        success: false,
+        message: "مسیر فایل معتبر نیست"
+      });
+    }
+
+    const parent = path.slice(0, path.lastIndexOf("/") + 1);
+    const name = path.slice(path.lastIndexOf("/") + 1);
+
+    const listResponse = await fetch(
+      base + "/storage/v1/object/list/chat-images",
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          prefix: parent,
+          search: name,
+          limit: 100
+        })
+      }
+    );
+
+    if (!listResponse.ok) {
+      throw new Error("chat_media_storage_check_failed");
+    }
+
+    const objects = await listResponse.json();
+    const object = Array.isArray(objects)
+      ? objects.find(item => item.name === name)
+      : null;
+
+    const actualSize = object && object.metadata
+      ? Number(object.metadata.size)
+      : NaN;
+
+    if (!object ||
+        !Number.isSafeInteger(actualSize) ||
+        actualSize !== size ||
+        actualSize > 52428800) {
+      return res.status(400).json({
+        success: false,
+        message: "فایل آپلودشده تأیید نشد یا حجم آن مطابقت ندارد"
+      });
+    }
+
+    const messageType = mime.startsWith("audio/") ? "audio" :
+      mime.startsWith("video/") ? "video" : "image";
+    const disappearingSeconds = Number(conversation.disappearing_seconds || 0);
+
+    const r = await fetch(base + "/rest/v1/chat_messages", {
       method: "POST",
       headers: {
         apikey: key,
@@ -2200,116 +2436,128 @@ app.post("/api/awareness/posts", async (req, res) => {
         "Content-Type": "application/json",
         Prefer: "return=representation"
       },
-      body: JSON.stringify([{
-        user_id: user.id,
-        content,
-        media_type: first ? first.type : "text",
-        media_path: first ? first.path : null,
-        media2_type: second ? second.type : null,
-        media2_path: second ? second.path : null,
-        price,
-        price_currency: price === null ? null : priceCurrency
-      }])
+      body: JSON.stringify({
+        conversation_id: Number(conversationId),
+        sender_id: me.id,
+        message_type: messageType,
+        message_text: null,
+        image_path: path,
+        expires_at: disappearingSeconds > 0
+          ? new Date(Date.now() + disappearingSeconds * 1000).toISOString()
+          : null
+      })
     });
 
-    if (!insert.ok) {
-      const detail = await insert.text().catch(() => "");
-      console.error("AWARENESS_INSERT_ERROR:", insert.status, detail.slice(0, 200));
-      await cleanupUploads(base, key);
+    if (!r.ok) {
+      const objectPath = path.split("/").map(encodeURIComponent).join("/");
+
+      await fetch(
+        base + "/storage/v1/object/chat-images/" + objectPath,
+        {
+          method: "DELETE",
+          headers: {
+            apikey: key,
+            Authorization: "Bearer " + key
+          }
+        }
+      ).catch(() => {});
+
+      console.error(
+        "ARIF_CHAT_MEDIA_DB_ERROR:",
+        r.status,
+        (await r.text()).slice(0, 200)
+      );
+
       return res.status(503).json({
         success: false,
-        message: "ذخیره پست در پایگاه داده ناموفق بود"
+        message: "ثبت رسانه در گفت‌وگو ناموفق بود"
       });
     }
 
-    const rows = await insert.json();
-    const post = Array.isArray(rows) ? rows[0] : null;
+    await fetch(
+      base + "/rest/v1/chat_conversations?id=eq." +
+        encodeURIComponent(conversationId),
+      {
+        method: "PATCH",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json",
+          Prefer: "return=minimal"
+        },
+        body: JSON.stringify({
+          last_message_at: new Date().toISOString()
+        })
+      }
+    );
+
+    const rows = await r.json();
+    const message = Array.isArray(rows) ? rows[0] : null;
+    const signedUrl = await arifChatSignedImage(path);
 
     return res.status(201).json({
       success: true,
-      post: post ? {
-        id: post.id,
-        user_id: post.user_id,
-        author: "کاربر #" + post.user_id,
-        content: post.content || "",
-        media_type: post.media_type || "text",
-        media_url: post.media_path ? await arifAwarenessSignedMedia(post.media_path) : null,
-        media2_type: post.media2_type || null,
-        media2_url: post.media2_path ? await arifAwarenessSignedMedia(post.media2_path) : null,
-        price: post.price == null ? null : Number(post.price),
-        price_currency: post.price_currency || null,
-        created_at: post.created_at
+      message: message ? {
+        id: message.id,
+        conversation_id: message.conversation_id,
+        sender_id: message.sender_id,
+        message_type: messageType,
+        image_url: messageType === "image" ? signedUrl : null,
+        video_url: messageType === "video" ? signedUrl : null,
+        audio_url: messageType === "audio" ? signedUrl : null,
+        created_at: message.created_at
       } : null
     });
   } catch (e) {
-    try {
-      const { base, key } = marketConfig();
-      await cleanupUploads(base, key);
-    } catch (_) {}
-    console.error("AWARENESS_CREATE_ERROR:", String(e.message || e).slice(0, 180));
+    console.error(
+      "ARIF_CHAT_MEDIA_COMPLETE_ERROR:",
+      String(e.message || e).slice(0, 150)
+    );
+
     return res.status(503).json({
       success: false,
-      message: "ثبت پست آگاهی ناموفق بود"
+      message: "ثبت رسانه ناموفق بود"
     });
   }
 });
 
-app.delete("/api/awareness/posts/:id", async (req, res) => {
+
+
+/* ARIF_CHAT_DELETE_MESSAGE_API_V1 */
+app.delete("/api/chat/conversations/:id/messages/:messageId", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const messageId = String(req.params.messageId || "");
+
+  if (!/^[0-9]+$/.test(conversationId) || !/^[0-9]+$/.test(messageId)) {
+    return res.status(400).json({ success: false, message: "شناسه پیام معتبر نیست" });
+  }
+
   try {
-    const session = marketSession(req);
-    if (!session) {
-      return res.status(401).json({
-        success: false,
-        message: "برای حذف آگاهی ابتدا وارد حساب شوید"
-      });
-    }
-
-    const user = await marketUser(session.email);
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: "حساب کاربری پیدا نشد"
-      });
-    }
-
-    const postId = String(req.params.id || "").trim();
-    if (!postId || postId.length > 100) {
-      return res.status(400).json({ success: false, message: "شناسه آگاهی نامعتبر است" });
-    }
-
     const { base, key } = marketConfig();
-    const lookup = new URLSearchParams({
-      select: "id,user_id,media_path,media2_path",
-      id: "eq." + postId,
-      limit: "1"
-    });
+    const me = await marketUser(session.email);
 
-    const found = await fetch(base + "/rest/v1/awareness_posts?" + lookup, {
-      headers: { apikey: key, Authorization: "Bearer " + key }
-    });
-
-    if (!found.ok) throw new Error("awareness_post_lookup_failed");
-
-    const rows = await found.json();
-    const post = Array.isArray(rows) ? rows[0] : null;
-
-    if (!post) {
-      return res.status(404).json({ success: false, message: "آگاهی پیدا نشد یا قبلاً حذف شده است" });
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
     }
 
-    if (String(post.user_id) !== String(user.id)) {
-      return res.status(403).json({
-        success: false,
-        message: "شما فقط می‌توانید آگاهی خودتان را حذف کنید"
-      });
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
     }
 
-    const deleteQuery = new URLSearchParams({
-      id: "eq." + String(post.id),
-      user_id: "eq." + String(user.id)
+    const params = new URLSearchParams({
+      select: "id,sender_id,image_path,message_type",
+      id: "eq." + messageId,
+      conversation_id: "eq." + conversationId,
+      sender_id: "eq." + me.id
     });
 
-    const deleted = await fetch(base + "/rest/v1/awareness_posts?" + deleteQuery, {
+    const deleted = await fetch(base + "/rest/v1/chat_messages?" + params, {
       method: "DELETE",
       headers: {
         apikey: key,
@@ -2319,48 +2567,630 @@ app.delete("/api/awareness/posts/:id", async (req, res) => {
     });
 
     if (!deleted.ok) {
-      const detail = await deleted.text().catch(() => "");
-      console.error("AWARENESS_DELETE_ERROR:", deleted.status, detail.slice(0, 150));
-      throw new Error("awareness_post_delete_failed");
+      console.error("ARIF_CHAT_DELETE_DB_ERROR:", deleted.status);
+      return res.status(503).json({ success: false, message: "حذف پیام ناموفق بود" });
     }
 
-    const deletedRows = await deleted.json().catch(() => []);
-    if (!Array.isArray(deletedRows) || deletedRows.length === 0) {
+    const rows = await deleted.json();
+    const message = Array.isArray(rows) ? rows[0] : null;
+
+    if (!message) {
       return res.status(404).json({
         success: false,
-        message: "آگاهی حذف نشد؛ لطفاً دوباره تلاش کنید"
+        message: "پیام پیدا نشد یا متعلق به شما نیست"
       });
     }
 
-    for (const mediaPath of [post.media_path, post.media2_path].filter(Boolean)) {
-      try {
-        const objectPath = String(mediaPath).split("/").map(encodeURIComponent).join("/");
-        const mediaDelete = await fetch(
-          base + "/storage/v1/object/awareness-media/" + objectPath,
+    if (message.image_path) {
+      const prefix = conversationId + "/" + me.id + "/";
+      if (String(message.image_path).startsWith(prefix)) {
+        const objectPath = message.image_path.split("/").map(encodeURIComponent).join("/");
+        const storageDelete = await fetch(
+          base + "/storage/v1/object/chat-images/" + objectPath,
           {
             method: "DELETE",
-            headers: { apikey: key, Authorization: "Bearer " + key }
+            headers: {
+              apikey: key,
+              Authorization: "Bearer " + key
+            }
           }
         );
-        if (!mediaDelete.ok) {
-          console.error("AWARENESS_MEDIA_DELETE_ERROR:", mediaDelete.status);
+
+        if (!storageDelete.ok) {
+          console.error("ARIF_CHAT_DELETE_STORAGE_ERROR:", storageDelete.status);
         }
-      } catch (mediaError) {
-        console.error("AWARENESS_MEDIA_DELETE_ERROR:", String(mediaError.message || mediaError).slice(0, 120));
       }
     }
 
-    return res.json({ success: true, message: "آگاهی حذف شد" });
+    return res.json({ success: true, deleted_id: message.id });
   } catch (e) {
-    console.error("AWARENESS_DELETE_ERROR:", String(e.message || e).slice(0, 160));
-    return res.status(503).json({
-      success: false,
-      message: "حذف آگاهی ناموفق بود؛ لطفاً دوباره تلاش کنید"
-    });
+    console.error("ARIF_CHAT_DELETE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "حذف پیام ناموفق بود" });
   }
 });
 
-/* END ARIF_AWARENESS_API_V1 */
+/* ARIF_CHAT_REPORT_API_V1 */
+app.post("/api/chat/conversations/:id/report", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  const allowedReasons = [
+    "spam",
+    "harassment",
+    "scam",
+    "inappropriate_content",
+    "impersonation",
+    "other"
+  ];
+
+  const reason = String(req.body?.reason || "").trim();
+  if (!allowedReasons.includes(reason)) {
+    return res.status(400).json({ success: false, message: "دلیل گزارش معتبر نیست" });
+  }
+
+  const detailsValue = req.body?.details;
+  if (detailsValue != null && typeof detailsValue !== "string") {
+    return res.status(400).json({ success: false, message: "توضیحات گزارش معتبر نیست" });
+  }
+
+  const details = String(detailsValue || "").trim();
+  if (details.length > 1000) {
+    return res.status(400).json({ success: false, message: "توضیحات حداکثر ۱۰۰۰ نویسه باشد" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) {
+      return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+    }
+
+    const r = await fetch(base + "/rest/v1/chat_reports", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+      },
+      body: JSON.stringify({
+        reporter_id: me.id,
+        reported_user_id: otherId,
+        conversation_id: conversation.id,
+        reason,
+        details: details || null
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_REPORT_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "ثبت گزارش انجام نشد" });
+    }
+
+    return res.status(201).json({ success: true, message: "گزارش ثبت شد" });
+  } catch (e) {
+    console.error("ARIF_CHAT_REPORT_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت گزارش ناموفق بود" });
+  }
+});
+/* END ARIF_CHAT_REPORT_API_V1 */
+
+
+
+/* ARIF_CHAT_BLOCK_API_V1 */
+
+app.post("/api/chat/conversations/:id/block", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+
+    const url = new URLSearchParams({
+      on_conflict: "blocker_id,blocked_user_id"
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_blocks?" + url, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=ignore-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        blocker_id: me.id,
+        blocked_user_id: otherId
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_BLOCK_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "مسدودسازی انجام نشد" });
+    }
+
+    return res.json({ success: true, blocked: true });
+  } catch (e) {
+    console.error("ARIF_CHAT_BLOCK_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "مسدودسازی ناموفق بود" });
+  }
+});
+
+app.delete("/api/chat/conversations/:id/block", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+
+    const q = new URLSearchParams({
+      blocker_id: "eq." + me.id,
+      blocked_user_id: "eq." + otherId
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_blocks?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=minimal"
+      }
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_UNBLOCK_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "رفع مسدودسازی انجام نشد" });
+    }
+
+    return res.json({ success: true, blocked: false });
+  } catch (e) {
+    console.error("ARIF_CHAT_UNBLOCK_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "رفع مسدودسازی ناموفق بود" });
+  }
+});
+
+app.get("/api/chat/conversations/:id/block-status", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) return res.status(404).json({ success: false, message: "کاربر گفتگو پیدا نشد" });
+
+    const q = new URLSearchParams({
+      select: "id",
+      blocker_id: "eq." + me.id,
+      blocked_user_id: "eq." + otherId,
+      limit: "1"
+    });
+
+    const r = await fetch(base + "/rest/v1/chat_blocks?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_BLOCK_STATUS_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "بررسی وضعیت انجام نشد" });
+    }
+
+    const rows = await r.json();
+    return res.json({ success: true, blocked: Array.isArray(rows) && rows.length > 0 });
+  } catch (e) {
+    console.error("ARIF_CHAT_BLOCK_STATUS_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "بررسی وضعیت ناموفق بود" });
+  }
+});
+
+/* END ARIF_CHAT_BLOCK_API_V1 */
+
+
+/* ARIF_CHAT_DISAPPEARING_API_V1 */
+
+app.get("/api/chat/conversations/:id/disappearing", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    return res.json({
+      success: true,
+      seconds: Number(conversation.disappearing_seconds || 0)
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_DISAPPEARING_READ_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "خواندن تنظیم ناموفق بود" });
+  }
+});
+
+app.patch("/api/chat/conversations/:id/disappearing", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  const seconds = Number(req.body && req.body.seconds);
+  if (![0, 36000, 86400].includes(seconds)) {
+    return res.status(400).json({ success: false, message: "مدت زمان انتخاب‌شده معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({ id: "eq." + conversationId });
+    const r = await fetch(base + "/rest/v1/chat_conversations?" + q, {
+      method: "PATCH",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({ disappearing_seconds: seconds })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_DISAPPEARING_UPDATE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "ذخیره تنظیم ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    if (!Array.isArray(rows) || !rows.length) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    return res.json({ success: true, seconds: Number(rows[0].disappearing_seconds || 0) });
+  } catch (e) {
+    console.error("ARIF_CHAT_DISAPPEARING_UPDATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ذخیره تنظیم ناموفق بود" });
+  }
+});
+
+/* END ARIF_CHAT_DISAPPEARING_API_V1 */
+
+
+/* ARIF_CHAT_PRESENCE_API_V1 */
+
+app.post("/api/chat/presence/heartbeat", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const now = new Date().toISOString();
+    const q = new URLSearchParams({ on_conflict: "user_id" });
+    const r = await fetch(base + "/rest/v1/chat_presence?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        user_id: me.id,
+        last_seen_at: now,
+        updated_at: now
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRESENCE_HEARTBEAT_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ثبت وضعیت حضور ناموفق بود" });
+    }
+
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRESENCE_HEARTBEAT_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت وضعیت حضور ناموفق بود" });
+  }
+});
+
+app.get("/api/chat/privacy/last-seen", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({
+      select: "last_seen_visibility",
+      user_id: "eq." + me.id,
+      limit: "1"
+    });
+    const r = await fetch(base + "/rest/v1/chat_user_privacy?" + q, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRIVACY_READ_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "خواندن حریم خصوصی ناموفق بود" });
+    }
+
+    const rows = await r.json();
+    const visibility = Array.isArray(rows) && rows.length
+      ? rows[0].last_seen_visibility
+      : "everyone";
+
+    return res.json({
+      success: true,
+      visibility: ["everyone", "nobody"].includes(visibility) ? visibility : "everyone"
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRIVACY_READ_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "خواندن حریم خصوصی ناموفق بود" });
+  }
+});
+
+app.patch("/api/chat/privacy/last-seen", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  const visibility = String(req.body && req.body.visibility || "");
+  if (!["everyone", "nobody"].includes(visibility)) {
+    return res.status(400).json({ success: false, message: "تنظیم حریم خصوصی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const q = new URLSearchParams({ on_conflict: "user_id" });
+    const r = await fetch(base + "/rest/v1/chat_user_privacy?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        user_id: me.id,
+        last_seen_visibility: visibility,
+        updated_at: new Date().toISOString()
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRIVACY_UPDATE_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ذخیره حریم خصوصی ناموفق بود" });
+    }
+
+    return res.json({ success: true, visibility });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRIVACY_UPDATE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ذخیره حریم خصوصی ناموفق بود" });
+  }
+});
+
+
+app.post("/api/chat/presence/leave", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const now = new Date();
+    const lastSeen = now.toISOString();
+    const offlineAt = new Date(now.getTime() - 120000).toISOString();
+
+    const q = new URLSearchParams({ on_conflict: "user_id" });
+    const r = await fetch(base + "/rest/v1/chat_presence?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({
+        user_id: me.id,
+        last_seen_at: lastSeen,
+        updated_at: offlineAt
+      })
+    });
+
+    if (!r.ok) {
+      console.error("ARIF_CHAT_PRESENCE_LEAVE_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ثبت خروج ناموفق بود" });
+    }
+
+    return res.json({ success: true, last_seen_at: lastSeen });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRESENCE_LEAVE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "ثبت خروج ناموفق بود" });
+  }
+});
+
+app.get("/api/chat/conversations/:id/presence", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({ success: false, message: "شناسه گفت‌وگو معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "گفت‌وگو پیدا نشد" });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.json({ success: true, visible: false, online: false, last_seen_at: null });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    if (!otherId) {
+      return res.status(404).json({ success: false, message: "مخاطب گفت‌وگو پیدا نشد" });
+    }
+
+    const privacyQ = new URLSearchParams({
+      select: "last_seen_visibility",
+      user_id: "eq." + otherId,
+      limit: "1"
+    });
+    const presenceQ = new URLSearchParams({
+      select: "last_seen_at,updated_at",
+      user_id: "eq." + otherId,
+      limit: "1"
+    });
+
+    const [privacyR, presenceR] = await Promise.all([
+      fetch(base + "/rest/v1/chat_user_privacy?" + privacyQ, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      }),
+      fetch(base + "/rest/v1/chat_presence?" + presenceQ, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      })
+    ]);
+
+    if (!privacyR.ok || !presenceR.ok) {
+      console.error("ARIF_CHAT_PRESENCE_READ_ERROR:", privacyR.status, presenceR.status);
+      return res.status(503).json({ success: false, message: "دریافت وضعیت مخاطب ناموفق بود" });
+    }
+
+    const privacyRows = await privacyR.json();
+    const presenceRows = await presenceR.json();
+    const visibility = Array.isArray(privacyRows) && privacyRows.length
+      ? privacyRows[0].last_seen_visibility
+      : "everyone";
+
+    if (visibility !== "everyone") {
+      return res.json({ success: true, visible: false, online: false, last_seen_at: null });
+    }
+
+    const presence = Array.isArray(presenceRows) && presenceRows.length
+      ? presenceRows[0]
+      : null;
+
+    const updatedAt = presence && presence.updated_at
+      ? new Date(presence.updated_at).getTime()
+      : 0;
+    const online = Number.isFinite(updatedAt) &&
+      updatedAt > 0 &&
+      Date.now() - updatedAt <= 60000;
+
+    return res.json({
+      success: true,
+      visible: true,
+      online,
+      last_seen_at: online ? null : (presence ? presence.last_seen_at : null)
+    });
+  } catch (e) {
+    console.error("ARIF_CHAT_PRESENCE_READ_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "دریافت وضعیت مخاطب ناموفق بود" });
+  }
+});
+
+/* END ARIF_CHAT_PRESENCE_API_V1 */
+
 
 
 require("./otp")(app);
@@ -2521,8 +3351,379 @@ app.get("/admin/api/chat/conversations/:id/messages", async (req, res) => {
 });
 /* END ADMIN_CHAT_VIEW_API */
 
+
+/* ARIF_CHAT_EXPIRY_CLEANUP_V1 */
+let arifChatExpiryCleanupRunning = false;
+
+async function arifCleanupExpiredChatMessages() {
+  if (arifChatExpiryCleanupRunning) return;
+  arifChatExpiryCleanupRunning = true;
+
+  try {
+    const { base, key } = marketConfig();
+    const now = new Date().toISOString();
+
+    const q = new URLSearchParams({
+      select: "id,message_type,image_path,expires_at",
+      expires_at: "lt." + now,
+      order: "expires_at.asc",
+      limit: "100"
+    });
+
+    const response = await fetch(
+      base + "/rest/v1/chat_messages?" + q,
+      {
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("expired_messages_read_failed_" + response.status);
+    }
+
+    const messages = await response.json();
+    let deleted = 0;
+    let skipped = 0;
+
+    for (const message of (Array.isArray(messages) ? messages : [])) {
+      try {
+        if (message.image_path) {
+          const objectPath = String(message.image_path)
+            .split("/")
+            .map(encodeURIComponent)
+            .join("/");
+
+          const storageDelete = await fetch(
+            base + "/storage/v1/object/chat-images/" + objectPath,
+            {
+              method: "DELETE",
+              headers: {
+                apikey: key,
+                Authorization: "Bearer " + key
+              }
+            }
+          );
+
+          if (!storageDelete.ok && storageDelete.status !== 404) {
+            skipped++;
+            console.error(
+              "ARIF_CHAT_EXPIRY_STORAGE_ERROR:",
+              storageDelete.status
+            );
+            continue;
+          }
+        }
+
+        const deleteQuery = new URLSearchParams({
+          id: "eq." + String(message.id),
+          expires_at: "lt." + now,
+          select: "id"
+        });
+
+        const dbDelete = await fetch(
+          base + "/rest/v1/chat_messages?" + deleteQuery,
+          {
+            method: "DELETE",
+            headers: {
+              apikey: key,
+              Authorization: "Bearer " + key,
+              Prefer: "return=representation"
+            }
+          }
+        );
+
+        if (!dbDelete.ok) {
+          skipped++;
+          console.error(
+            "ARIF_CHAT_EXPIRY_DB_DELETE_ERROR:",
+            dbDelete.status
+          );
+          continue;
+        }
+
+        const deletedRows = await dbDelete.json();
+        if (Array.isArray(deletedRows) && deletedRows.length) {
+          deleted += deletedRows.length;
+        }
+      } catch (itemError) {
+        skipped++;
+        console.error(
+          "ARIF_CHAT_EXPIRY_ITEM_ERROR:",
+          String(itemError.message || itemError).slice(0, 120)
+        );
+      }
+    }
+
+    if (deleted || skipped) {
+      console.log(
+        "ARIF_CHAT_EXPIRY_CLEANUP:",
+        "deleted=" + deleted,
+        "skipped=" + skipped
+      );
+    }
+  } catch (error) {
+    console.error(
+      "ARIF_CHAT_EXPIRY_CLEANUP_ERROR:",
+      String(error.message || error).slice(0, 150)
+    );
+  } finally {
+    arifChatExpiryCleanupRunning = false;
+  }
+}
+/* END ARIF_CHAT_EXPIRY_CLEANUP_V1 */
+
+
+/* ARIF_CHAT_CALL_SIGNAL_API_V1 */
+
+const ARIF_CALL_SIGNAL_TYPES = [
+  "offer", "answer", "candidate", "reject", "hangup", "busy"
+];
+
+app.post("/api/chat/calls/:id/signals", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      message: "ابتدا وارد حساب شوید"
+    });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({
+      success: false,
+      message: "شناسه گفتگو معتبر نیست"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+
+    if (!me) {
+      return res.status(404).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const conversation = await arifChatConversation(
+      conversationId, me.id
+    );
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "گفتگو پیدا نشد"
+      });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "تماس با این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const otherId = arifChatOtherUserId(conversation, me.id);
+    const body = req.body || {};
+    const callId = String(body.callId || "");
+    const signalType = String(body.signalType || "");
+    const payload = body.payload == null ? {} : body.payload;
+
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(callId)) {
+      return res.status(400).json({
+        success: false,
+        message: "شناسه تماس معتبر نیست"
+      });
+    }
+
+    if (!ARIF_CALL_SIGNAL_TYPES.includes(signalType)) {
+      return res.status(400).json({
+        success: false,
+        message: "نوع سیگنال معتبر نیست"
+      });
+    }
+
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return res.status(400).json({
+        success: false,
+        message: "اطلاعات تماس معتبر نیست"
+      });
+    }
+
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > 60000) {
+      return res.status(413).json({
+        success: false,
+        message: "حجم اطلاعات تماس بیش از حد مجاز است"
+      });
+    }
+
+    const insert = await fetch(base + "/rest/v1/chat_call_signals", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        call_id: callId,
+        sender_user_id: String(me.id),
+        recipient_user_id: String(otherId),
+        signal_type: signalType,
+        payload
+      })
+    });
+
+    if (!insert.ok) {
+      console.error(
+        "ARIF_CALL_SIGNAL_INSERT_ERROR:",
+        insert.status,
+        (await insert.text()).slice(0, 200)
+      );
+      return res.status(503).json({
+        success: false,
+        message: "ارسال سیگنال تماس ناموفق بود"
+      });
+    }
+
+    const rows = await insert.json();
+    return res.json({
+      success: true,
+      signal: Array.isArray(rows) ? rows[0] : null
+    });
+
+  } catch (e) {
+    console.error(
+      "ARIF_CALL_SIGNAL_POST_ERROR:",
+      String(e.message || e).slice(0, 150)
+    );
+    return res.status(503).json({
+      success: false,
+      message: "خطا در ارسال سیگنال تماس"
+    });
+  }
+});
+
+app.get("/api/chat/calls/:id/signals", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      message: "ابتدا وارد حساب شوید"
+    });
+  }
+
+  const conversationId = String(req.params.id || "");
+  const after = String(req.query.after || "0");
+  const callId = String(req.query.callId || "");
+
+  if (!/^[0-9]+$/.test(conversationId) ||
+      !/^[0-9]{1,18}$/.test(after)) {
+    return res.status(400).json({
+      success: false,
+      message: "درخواست تماس معتبر نیست"
+    });
+  }
+
+  if (callId && !/^[A-Za-z0-9_-]{8,100}$/.test(callId)) {
+    return res.status(400).json({
+      success: false,
+      message: "شناسه تماس معتبر نیست"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+
+    if (!me) {
+      return res.status(404).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const conversation = await arifChatConversation(
+      conversationId, me.id
+    );
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "گفتگو پیدا نشد"
+      });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "دسترسی تماس مسدود است"
+      });
+    }
+
+    const q = new URLSearchParams({
+      select: "id,call_id,sender_user_id,signal_type,payload,created_at",
+      conversation_id: "eq." + conversationId,
+      recipient_user_id: "eq." + String(me.id),
+      id: "gt." + after,
+      created_at: "gt." + new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      order: "id.asc",
+      limit: "100"
+    });
+
+    if (callId) q.set("call_id", "eq." + callId);
+
+    const r = await fetch(
+      base + "/rest/v1/chat_call_signals?" + q,
+      { headers: { apikey: key, Authorization: "Bearer " + key } }
+    );
+
+    if (!r.ok) {
+      console.error("ARIF_CALL_SIGNAL_READ_ERROR:", r.status);
+      return res.status(503).json({
+        success: false,
+        message: "دریافت سیگنال تماس ناموفق بود"
+      });
+    }
+
+    const signals = await r.json();
+    return res.json({
+      success: true,
+      signals: Array.isArray(signals) ? signals : []
+    });
+
+  } catch (e) {
+    console.error(
+      "ARIF_CALL_SIGNAL_GET_ERROR:",
+      String(e.message || e).slice(0, 150)
+    );
+    return res.status(503).json({
+      success: false,
+      message: "خطا در دریافت سیگنال تماس"
+    });
+  }
+});
+
+/* END ARIF_CHAT_CALL_SIGNAL_API_V1 */
+
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Arif App Backend running on port ${PORT}`);
+
+  void arifCleanupExpiredChatMessages();
+
+  setInterval(() => {
+    void arifCleanupExpiredChatMessages();
+  }, 5 * 60 * 1000);
 });
