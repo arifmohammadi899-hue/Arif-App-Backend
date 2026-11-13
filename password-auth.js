@@ -510,6 +510,111 @@ module.exports = function (app) {
   });
 
 
+
+  app.post("/api/auth/google/link", async (req, res) => {
+    try {
+      const secret = process.env.ARIF_SESSION_SECRET;
+      const base = process.env.SUPABASE_URL;
+      const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+      const clientId = process.env.GOOGLE_WEB_CLIENT_ID;
+      if (!secret || Buffer.byteLength(secret) < 32 || !base || !key || !clientId) {
+        return res.status(503).json({ success: false, message: "تنظیمات امن اتصال گوگل آماده نیست" });
+      }
+
+      const auth = String(req.headers.authorization || "");
+      const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+      const parts = token.split(".");
+      if (parts.length !== 2) {
+        return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+      }
+
+      const expected = crypto.createHmac("sha256", secret).update(parts[0]).digest();
+      const actual = Buffer.from(parts[1], "base64url");
+      if (actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+        return res.status(401).json({ success: false, message: "نشست معتبر نیست" });
+      }
+
+      let session;
+      try {
+        session = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+      } catch (_) {
+        return res.status(401).json({ success: false, message: "نشست معتبر نیست" });
+      }
+
+      const email = String(session.email || "").trim().toLowerCase();
+      if (!validEmail(email) || !Number.isFinite(session.exp) ||
+          session.exp <= Math.floor(Date.now() / 1000)) {
+        return res.status(401).json({ success: false, message: "نشست منقضی شده است" });
+      }
+
+      const idToken = String(req.body.idToken || "");
+      if (!idToken || idToken.length > 10000) {
+        return res.status(400).json({ success: false, message: "توکن گوگل معتبر نیست" });
+      }
+
+      const googleResponse = await fetch(
+        "https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(idToken)
+      );
+      if (!googleResponse.ok) {
+        return res.status(401).json({ success: false, message: "تأیید حساب گوگل ناموفق بود" });
+      }
+
+      const google = await googleResponse.json();
+      const exp = Number(google.exp);
+      const googleSub = String(google.sub || "");
+      if (google.aud !== clientId ||
+          !["accounts.google.com", "https://accounts.google.com"].includes(String(google.iss || "")) ||
+          !googleSub || googleSub.length > 255 ||
+          !Number.isFinite(exp) || exp <= Math.floor(Date.now() / 1000) ||
+          String(google.email_verified) !== "true") {
+        return res.status(401).json({ success: false, message: "هویت گوگل معتبر یا تأییدشده نیست" });
+      }
+
+      const headers = {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json"
+      };
+      const root = base.replace(/\/$/, "") + "/rest/v1/app_users";
+
+      const userQuery = new URLSearchParams({
+        select: "id,email,google_sub",
+        email: "eq." + email,
+        limit: "1"
+      });
+      const userResponse = await fetch(root + "?" + userQuery, { headers });
+      if (!userResponse.ok) throw new Error("GOOGLE_LINK_USER_LOOKUP_FAILED");
+      const users = await userResponse.json();
+      const user = users[0];
+      if (!user) return res.status(404).json({ success: false, message: "حساب عارف اپ پیدا نشد" });
+
+      const ownerQuery = new URLSearchParams({
+        select: "id",
+        google_sub: "eq." + googleSub,
+        limit: "1"
+      });
+      const ownerResponse = await fetch(root + "?" + ownerQuery, { headers });
+      if (!ownerResponse.ok) throw new Error("GOOGLE_LINK_OWNER_LOOKUP_FAILED");
+      const owners = await ownerResponse.json();
+      if (owners.some(row => String(row.id) !== String(user.id))) {
+        return res.status(409).json({ success: false, message: "این حساب گوگل به حساب دیگری متصل است" });
+      }
+
+      const updateQuery = new URLSearchParams({ id: "eq." + user.id });
+      const saved = await fetch(root + "?" + updateQuery, {
+        method: "PATCH",
+        headers: { ...headers, Prefer: "return=minimal" },
+        body: JSON.stringify({ google_sub: googleSub })
+      });
+      if (!saved.ok) throw new Error("GOOGLE_LINK_SAVE_FAILED");
+
+      return res.json({ success: true, message: "حساب گوگل با موفقیت متصل شد" });
+    } catch (err) {
+      console.error("GOOGLE_LINK_ERROR:", String(err.message || err).slice(0, 180));
+      return res.status(503).json({ success: false, message: "اتصال گوگل ناموفق بود؛ دوباره تلاش کنید" });
+    }
+  });
+
   // Authenticated profile editing: phone, email and password are immutable here.
   app.patch("/api/profile", async (req, res) => {
     try {
