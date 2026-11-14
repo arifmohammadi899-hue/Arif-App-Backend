@@ -1683,7 +1683,33 @@ app.get("/api/chat/conversations", async (req, res) => {
           other_user_name: otherName,
           other_user_phone: String(other.phone || ""),
           last_message: last
-            ? (last.message_type === "image" ? "🖼️ عکس" : String(last.message_text || "").slice(0, 120))
+            ? (last.message_type === "image"
+                ? "🖼️ عکس"
+                : last.message_type === "call"
+                  ? (() => {
+                      try {
+                        const call = JSON.parse(String(last.message_text || "{}"));
+                        const mode = call.mode === "video" ? "تصویری" : "صوتی";
+                        const status = {
+                          completed: "پایان‌یافته",
+                          missed: "بی‌پاسخ",
+                          rejected: "ردشده",
+                          cancelled: "لغوشده",
+                          busy: "مشغول"
+                        }[call.status] || "تماس";
+                        const duration = Math.max(0, Number(call.duration_seconds) || 0);
+                        const time = duration
+                          ? " – " + (duration >= 60
+                              ? Math.floor(duration / 60) + " دقیقه"
+                              : duration + " ثانیه")
+                          : "";
+                        return (call.mode === "video" ? "📹 " : "📞 ") +
+                          "تماس " + mode + " – " + status + time;
+                      } catch (_) {
+                        return "📞 سابقه تماس";
+                      }
+                    })()
+                  : String(last.message_text || "").slice(0, 120))
             : "هنوز پیامی ارسال نشده",
           last_message_at: last ? last.created_at : c.last_message_at
         };
@@ -1979,7 +2005,7 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
     }
 
     const q = new URLSearchParams({
-      select: "id,conversation_id,sender_id,message_type,message_text,image_path,created_at,read_at",
+      select: "id,conversation_id,sender_id,message_type,message_text,image_path,call_id,created_at,read_at",
       conversation_id: "eq." + conversationId,
       or: "(expires_at.is.null,expires_at.gt." + new Date().toISOString() + ")",
       order: "created_at.asc",
@@ -1997,6 +2023,7 @@ app.get("/api/chat/conversations/:id/messages", async (req, res) => {
       sender_id: m.sender_id,
       message_type: m.message_type,
       message_text: m.message_text,
+      call_id: m.call_id || null,
       image_url: m.message_type === "image" ? await arifChatSignedImage(m.image_path) : null,
       video_url: m.message_type === "video" ? await arifChatSignedImage(m.image_path) : null,
       audio_url: m.message_type === "audio" ? await arifChatSignedImage(m.image_path) : null,
@@ -3713,6 +3740,170 @@ app.get("/api/chat/calls/:id/signals", async (req, res) => {
     });
   }
 });
+
+
+/* ARIF_CHAT_CALL_HISTORY_API_V1 */
+app.post("/api/chat/calls/:id/history", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      message: "ابتدا وارد حساب شوید"
+    });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({
+      success: false,
+      message: "شناسه گفتگو معتبر نیست"
+    });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const conversation = await arifChatConversation(conversationId, me.id);
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "گفتگو پیدا نشد"
+      });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "ثبت سابقه تماس امکان‌پذیر نیست"
+      });
+    }
+
+    const body = req.body || {};
+    const callId = String(body.callId || "");
+    const mode = body.mode === "video" ? "video" : "audio";
+    const allowedStatuses = ["completed", "missed", "rejected", "cancelled", "busy", "failed"];
+    const status = String(body.status || "");
+    const duration = Number(body.durationSeconds);
+
+    if (!/^[A-Za-z0-9_-]{8,100}$/.test(callId)) {
+      return res.status(400).json({
+        success: false,
+        message: "شناسه تماس معتبر نیست"
+      });
+    }
+
+    if (!allowedStatuses.includes(status)) {
+      return res.status(400).json({
+        success: false,
+        message: "وضعیت تماس معتبر نیست"
+      });
+    }
+
+    if (!Number.isInteger(duration) || duration < 0 || duration > 86400) {
+      return res.status(400).json({
+        success: false,
+        message: "مدت تماس معتبر نیست"
+      });
+    }
+
+    const existingQuery = new URLSearchParams({
+      select: "id,conversation_id,sender_id,message_type,message_text,call_id,created_at",
+      conversation_id: "eq." + conversationId,
+      call_id: "eq." + callId,
+      message_type: "eq.call",
+      limit: "1"
+    });
+
+    const existingResponse = await fetch(
+      base + "/rest/v1/chat_messages?" + existingQuery,
+      { headers: { apikey: key, Authorization: "Bearer " + key } }
+    );
+
+    if (!existingResponse.ok) {
+      throw new Error("call_history_lookup_failed");
+    }
+
+    const existingRows = await existingResponse.json();
+    if (Array.isArray(existingRows) && existingRows.length) {
+      return res.json({ success: true, duplicate: true, message: existingRows[0] });
+    }
+
+    const metadata = {
+      kind: "arif_call",
+      call_id: callId,
+      mode,
+      status,
+      duration_seconds: duration
+    };
+
+    const insertResponse = await fetch(base + "/rest/v1/chat_messages", {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "return=representation"
+      },
+      body: JSON.stringify({
+        conversation_id: conversationId,
+        sender_id: String(me.id),
+        message_type: "call",
+        message_text: JSON.stringify(metadata),
+        image_path: null,
+        call_id: callId,
+        expires_at: null
+      })
+    });
+
+    if (!insertResponse.ok) {
+      const errorText = await insertResponse.text();
+
+      // A second participant may have recorded the same call concurrently.
+      if (insertResponse.status === 409 || insertResponse.status === 23505) {
+        const retryResponse = await fetch(
+          base + "/rest/v1/chat_messages?" + existingQuery,
+          { headers: { apikey: key, Authorization: "Bearer " + key } }
+        );
+        if (retryResponse.ok) {
+          const retryRows = await retryResponse.json();
+          if (Array.isArray(retryRows) && retryRows.length) {
+            return res.json({ success: true, duplicate: true, message: retryRows[0] });
+          }
+        }
+      }
+
+      console.error("ARIF_CALL_HISTORY_INSERT_ERROR:", insertResponse.status, errorText.slice(0, 200));
+      return res.status(503).json({
+        success: false,
+        message: "ثبت سابقه تماس ناموفق بود"
+      });
+    }
+
+    const rows = await insertResponse.json();
+    return res.json({
+      success: true,
+      duplicate: false,
+      message: Array.isArray(rows) ? rows[0] : null
+    });
+
+  } catch (e) {
+    console.error("ARIF_CALL_HISTORY_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({
+      success: false,
+      message: "خطا در ثبت سابقه تماس"
+    });
+  }
+});
+/* END ARIF_CHAT_CALL_HISTORY_API_V1 */
 
 /* END ARIF_CHAT_CALL_SIGNAL_API_V1 */
 
