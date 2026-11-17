@@ -3505,6 +3505,99 @@ async function arifCleanupExpiredChatMessages() {
 
 /* ARIF_CHAT_CALL_SIGNAL_API_V1 */
 
+app.get("/api/chat/calls/:id/ice-servers", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({
+      success: false,
+      message: "ابتدا وارد حساب شوید"
+    });
+  }
+
+  const conversationId = String(req.params.id || "");
+  if (!/^[0-9]+$/.test(conversationId)) {
+    return res.status(400).json({
+      success: false,
+      message: "شناسه گفتگو معتبر نیست"
+    });
+  }
+
+  try {
+    const me = await marketUser(session.email);
+    if (!me) {
+      return res.status(404).json({
+        success: false,
+        message: "حساب کاربری پیدا نشد"
+      });
+    }
+
+    const conversation = await arifChatConversation(
+      conversationId, me.id
+    );
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: "گفتگو پیدا نشد"
+      });
+    }
+
+    if (await arifChatIsBlocked(conversation, me.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "تماس با این کاربر امکان‌پذیر نیست"
+      });
+    }
+
+    const username = process.env.METERED_TURN_USERNAME;
+    const credential = process.env.METERED_TURN_PASSWORD;
+
+    if (!username || !credential) {
+      return res.status(503).json({
+        success: false,
+        message: "تنظیمات سرور تماس هنوز در دسترس نیست"
+      });
+    }
+
+    return res.json({
+      success: true,
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun.relay.metered.ca:80" },
+        {
+          urls: "turn:global.relay.metered.ca:80",
+          username,
+          credential
+        },
+        {
+          urls: "turn:global.relay.metered.ca:80?transport=tcp",
+          username,
+          credential
+        },
+        {
+          urls: "turn:global.relay.metered.ca:443",
+          username,
+          credential
+        },
+        {
+          urls: "turns:global.relay.metered.ca:443?transport=tcp",
+          username,
+          credential
+        }
+      ]
+    });
+  } catch (error) {
+    console.error("ARIF_CALL_ICE_CONFIG_ERROR:", error.message);
+    return res.status(500).json({
+      success: false,
+      message: "خطا در دریافت تنظیمات سرور تماس"
+    });
+  }
+});
+
 const ARIF_CALL_SIGNAL_TYPES = [
   "offer", "answer", "candidate", "reject", "hangup", "busy"
 ];
