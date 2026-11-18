@@ -1521,6 +1521,166 @@ app.delete("/api/job-ads/:id", async (req, res) => {
 /* END ARIF_JOB_ADS_API_V1 */
 
 
+
+/* ARIF_SAVED_JOB_ADS_API_V1 */
+
+// دریافت آگهی‌های کاری ذخیره‌شده کاربر
+app.get("/api/job-ads/saved", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const sq = new URLSearchParams({
+      select: "ad_id,created_at",
+      user_id: "eq." + user.id,
+      order: "created_at.desc"
+    });
+
+    const sr = await fetch(base + "/rest/v1/saved_job_ads?" + sq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!sr.ok) throw new Error("saved_job_lookup_failed");
+
+    const savedRows = await sr.json();
+    if (!Array.isArray(savedRows) || !savedRows.length) {
+      return res.json({ success: true, ads: [] });
+    }
+
+    const ids = savedRows.map(row => row.ad_id).filter(validSavedAdId);
+    if (!ids.length) return res.json({ success: true, ads: [] });
+
+    const aq = new URLSearchParams({
+      select: "id,user_id,ad_type,title,description,city,address,salary,phone,contact_name,created_at",
+      id: "in.(" + ids.join(",") + ")"
+    });
+
+    const ar = await fetch(base + "/rest/v1/job_ads?" + aq, {
+      headers: { apikey: key, Authorization: "Bearer " + key }
+    });
+
+    if (!ar.ok) throw new Error("saved_job_details_lookup_failed");
+
+    const rows = await ar.json();
+    const byId = new Map(rows.map(ad => [String(ad.id), ad]));
+    const ads = [];
+
+    for (const saved of savedRows) {
+      const ad = byId.get(String(saved.ad_id));
+      if (!ad) continue;
+      ads.push({ ...ad, saved_at: saved.created_at });
+    }
+
+    return res.json({ success: true, ads });
+  } catch (e) {
+    console.error("SAVED_JOB_ADS_LIST_ERROR:", String(e.message || e).slice(0, 160));
+    return res.status(503).json({
+      success: false,
+      message: "دریافت آگهی‌های کاری ذخیره‌شده ناموفق بود"
+    });
+  }
+});
+
+// ذخیره آگهی کاری
+app.post("/api/job-ads/saved/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const id = String(req.params.id || "");
+  if (!validSavedAdId(id)) {
+    return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({ on_conflict: "user_id,ad_id" });
+    const r = await fetch(base + "/rest/v1/saved_job_ads?" + q, {
+      method: "POST",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+        Prefer: "resolution=merge-duplicates,return=minimal"
+      },
+      body: JSON.stringify({ user_id: user.id, ad_id: id })
+    });
+
+    if (!r.ok) {
+      console.error("SAVED_JOB_AD_ADD_ERROR:", r.status, (await r.text()).slice(0, 160));
+      return res.status(503).json({ success: false, message: "ذخیره آگهی کاری ناموفق بود" });
+    }
+
+    return res.json({ success: true, saved: true });
+  } catch (e) {
+    console.error("SAVED_JOB_AD_ADD_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال به سرور ناموفق بود" });
+  }
+});
+
+// لغو ذخیره آگهی کاری
+app.delete("/api/job-ads/saved/:id", async (req, res) => {
+  const session = marketSession(req);
+  if (!session) {
+    return res.status(401).json({ success: false, message: "ابتدا وارد حساب شوید" });
+  }
+
+  const id = String(req.params.id || "");
+  if (!validSavedAdId(id)) {
+    return res.status(400).json({ success: false, message: "شناسه آگهی معتبر نیست" });
+  }
+
+  try {
+    const { base, key } = marketConfig();
+    const user = await marketUser(session.email);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "حساب کاربری پیدا نشد" });
+    }
+
+    const q = new URLSearchParams({
+      user_id: "eq." + user.id,
+      ad_id: "eq." + id
+    });
+
+    const r = await fetch(base + "/rest/v1/saved_job_ads?" + q, {
+      method: "DELETE",
+      headers: {
+        apikey: key,
+        Authorization: "Bearer " + key,
+        Prefer: "return=minimal"
+      }
+    });
+
+    if (!r.ok) {
+      console.error("SAVED_JOB_AD_REMOVE_ERROR:", r.status);
+      return res.status(503).json({ success: false, message: "لغو ذخیره ناموفق بود" });
+    }
+
+    return res.json({ success: true, saved: false });
+  } catch (e) {
+    console.error("SAVED_JOB_AD_REMOVE_ERROR:", String(e.message || e).slice(0, 150));
+    return res.status(503).json({ success: false, message: "اتصال به سرور ناموفق بود" });
+  }
+});
+
+/* END ARIF_SAVED_JOB_ADS_API_V1 */
+
+
 /* END MARKETPLACE_API_V1 */
 
 
