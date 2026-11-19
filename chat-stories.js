@@ -402,7 +402,9 @@ module.exports = function registerChatStories(app, deps) {
         });
       }
 
+      const viewerId = Number(me.id);
       const { base, key } = marketConfig();
+
       const q = new URLSearchParams({
         select: "id,owner_id,media_path,media_type,caption,created_at,expires_at",
         expires_at: "gt." + new Date().toISOString(),
@@ -415,16 +417,18 @@ module.exports = function registerChatStories(app, deps) {
       });
 
       if (!r.ok) throw new Error("stories_read_failed");
+
       const rows = await r.json();
       const eligible = [];
       const permissionCache = new Map();
 
       for (const story of (Array.isArray(rows) ? rows : [])) {
         const ownerId = Number(story.owner_id);
+
         if (!permissionCache.has(ownerId)) {
           permissionCache.set(
             ownerId,
-            canViewStories(ownerId, Number(me.id))
+            canViewStories(ownerId, viewerId)
           );
         }
 
@@ -434,22 +438,166 @@ module.exports = function registerChatStories(app, deps) {
         if (!mediaUrl) continue;
 
         eligible.push({
-          id: story.id,
+          id: Number(story.id),
           owner_id: ownerId,
           media_type: story.media_type,
           caption: story.caption || "",
           created_at: story.created_at,
           expires_at: story.expires_at,
-          media_url: mediaUrl
+          media_url: mediaUrl,
+          viewed_by_me: false
         });
       }
 
-      return res.json({ success: true, current_user_id: Number(me.id), stories: eligible });
+      const visibleIds = eligible
+        .map(story => Number(story.id))
+        .filter(id => Number.isSafeInteger(id) && id > 0);
+
+      if (visibleIds.length) {
+        const vq = new URLSearchParams({
+          select: "story_id",
+          viewer_id: "eq." + viewerId,
+          story_id: "in.(" + visibleIds.join(",") + ")"
+        });
+
+        const vr = await fetch(
+          base + "/rest/v1/arif_chat_story_views?" + vq,
+          {
+            headers: { apikey: key, Authorization: "Bearer " + key }
+          }
+        );
+
+        if (!vr.ok) throw new Error("story_views_read_failed");
+
+        const viewedRows = await vr.json();
+        const viewedIds = new Set(
+          (Array.isArray(viewedRows) ? viewedRows : [])
+            .map(row => Number(row.story_id))
+        );
+
+        for (const story of eligible) {
+          story.viewed_by_me = viewedIds.has(Number(story.id));
+        }
+      }
+
+      return res.json({
+        success: true,
+        current_user_id: viewerId,
+        stories: eligible
+      });
     } catch (e) {
-      console.error("ARIF_STORIES_READ_ERROR:", String(e.message || e).slice(0, 150));
+      console.error(
+        "ARIF_STORIES_READ_ERROR:",
+        String(e.message || e).slice(0, 150)
+      );
       return res.status(503).json({
         success: false,
         message: "دریافت استوری‌ها ناموفق بود"
+      });
+    }
+  });
+
+  app.post("/api/chat/stories/:id/view", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const session = auth(req, res);
+    if (!session) return;
+
+    try {
+      const storyId = Number(req.params.id);
+      if (!Number.isSafeInteger(storyId) || storyId <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "شناسه استوری معتبر نیست"
+        });
+      }
+
+      const me = await currentUser(session);
+      if (!me) {
+        return res.status(404).json({
+          success: false,
+          message: "حساب کاربری پیدا نشد"
+        });
+      }
+
+      const viewerId = Number(me.id);
+      const { base, key } = marketConfig();
+
+      const q = new URLSearchParams({
+        select: "id,owner_id,expires_at",
+        id: "eq." + storyId,
+        expires_at: "gt." + new Date().toISOString(),
+        limit: "1"
+      });
+
+      const r = await fetch(base + "/rest/v1/arif_chat_stories?" + q, {
+        headers: { apikey: key, Authorization: "Bearer " + key }
+      });
+
+      if (!r.ok) throw new Error("story_view_lookup_failed");
+
+      const rows = await r.json();
+      const story = Array.isArray(rows) ? rows[0] : null;
+
+      if (!story) {
+        return res.status(404).json({
+          success: false,
+          message: "استوری پیدا نشد یا منقضی شده است"
+        });
+      }
+
+      const ownerId = Number(story.owner_id);
+
+      if (ownerId === viewerId) {
+        return res.json({
+          success: true,
+          viewed: false,
+          own_story: true
+        });
+      }
+
+      if (!(await canViewStories(ownerId, viewerId))) {
+        return res.status(403).json({
+          success: false,
+          message: "اجازه مشاهده این استوری را ندارید"
+        });
+      }
+
+      const viewUrl = new URL(
+        base + "/rest/v1/arif_chat_story_views"
+      );
+      viewUrl.searchParams.set("on_conflict", "story_id,viewer_id");
+
+      const saved = await fetch(viewUrl.toString(), {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json",
+          Prefer: "resolution=merge-duplicates,return=minimal"
+        },
+        body: JSON.stringify({
+          story_id: storyId,
+          viewer_id: viewerId
+        })
+      });
+
+      if (!saved.ok) {
+        throw new Error("story_view_save_failed");
+      }
+
+      return res.json({
+        success: true,
+        viewed: true,
+        story_id: storyId
+      });
+    } catch (e) {
+      console.error(
+        "ARIF_STORY_VIEW_ERROR:",
+        String(e.message || e).slice(0, 150)
+      );
+      return res.status(503).json({
+        success: false,
+        message: "ثبت بازدید استوری ناموفق بود"
       });
     }
   });
