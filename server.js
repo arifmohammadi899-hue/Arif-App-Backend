@@ -939,6 +939,45 @@ function marketSession(req) {
   console.warn("MARKET_AUTH_REJECT:", reason);
   return null;
 }
+
+async function createChatProfilePhotoUrl(base, key, photoPath) {
+  try {
+    if (!photoPath) return "";
+    if (/^https?:\/\//i.test(String(photoPath))) return String(photoPath);
+
+    const encoded = String(photoPath).split("/")
+      .map(encodeURIComponent).join("/");
+
+    const response = await fetch(
+      base.replace(/\/$/, "") +
+      "/storage/v1/object/sign/marketplace-media/" + encoded,
+      {
+        method: "POST",
+        headers: {
+          apikey: key,
+          Authorization: "Bearer " + key,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ expiresIn: 3600 })
+      }
+    );
+
+    if (!response.ok) return "";
+    const data = await response.json();
+    const signed = data.signedURL || data.signedUrl || "";
+    if (!signed) return "";
+    if (/^https?:\/\//i.test(signed)) return signed;
+
+    const pathPart = signed.startsWith("/") ? signed : "/" + signed;
+    return base.replace(/\/$/, "") +
+      (pathPart.startsWith("/storage/v1/")
+        ? pathPart
+        : "/storage/v1" + pathPart);
+  } catch (_) {
+    return "";
+  }
+}
+
 function marketConfig() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -1794,7 +1833,7 @@ app.get("/api/chat/conversations", async (req, res) => {
     )).filter(id => /^[0-9]+$/.test(id)))];
 
     const uq = new URLSearchParams({
-      select: "id,phone,first_name,surname,username",
+      select: "id,phone,first_name,surname,username,profile_photo_path",
       id: "in.(" + ids.join(",") + ")"
     });
     const ur = await fetch(base + "/rest/v1/app_users?" + uq, {
@@ -1803,8 +1842,15 @@ app.get("/api/chat/conversations", async (req, res) => {
     if (!ur.ok) throw new Error("chat_users_read_failed");
 
     const users = await ur.json();
-    const userById = new Map((Array.isArray(users) ? users : [])
-      .map(u => [String(u.id), u]));
+    const usersWithPhotos = await Promise.all(
+      (Array.isArray(users) ? users : []).map(async u => ({
+        ...u,
+        profile_photo_url: await createChatProfilePhotoUrl(
+          base, key, u.profile_photo_path
+        )
+      }))
+    );
+    const userById = new Map(usersWithPhotos.map(u => [String(u.id), u]));
 
     const conversationIds = conversations.map(c => String(c.id));
     const mq = new URLSearchParams({
@@ -1842,6 +1888,7 @@ app.get("/api/chat/conversations", async (req, res) => {
           other_user_id: otherId,
           other_user_name: otherName,
           other_user_phone: String(other.phone || ""),
+          other_user_profile_photo_url: String(other.profile_photo_url || ""),
           last_message: last
             ? (last.message_type === "image"
                 ? "🖼️ عکس"
@@ -1989,7 +2036,7 @@ app.post("/api/chat/match-contacts", async (req, res) => {
     }
 
     const q = new URLSearchParams({
-      select: "id,phone,first_name,surname,username",
+      select: "id,phone,first_name,surname,username,profile_photo_path",
       phone_verified: "eq.true",
       phone: "in.(" + phones.join(",") + ")",
       limit: "500"
@@ -2002,14 +2049,19 @@ app.post("/api/chat/match-contacts", async (req, res) => {
     if (!r.ok) throw new Error("contact_match_query_failed");
 
     const rows = await r.json();
-    const users = (Array.isArray(rows) ? rows : [])
-      .filter(u => String(u.id) !== String(me.id))
-      .map(u => ({
-        id: u.id,
-        phone: String(u.phone || ""),
-        name: [u.first_name, u.surname].filter(Boolean).join(" ").trim()
-          || String(u.username || "کاربر عارف")
-      }));
+    const users = await Promise.all(
+      (Array.isArray(rows) ? rows : [])
+        .filter(u => String(u.id) !== String(me.id))
+        .map(async u => ({
+          id: u.id,
+          phone: String(u.phone || ""),
+          name: [u.first_name, u.surname].filter(Boolean).join(" ").trim()
+            || String(u.username || "کاربر عارف"),
+          profile_photo_url: await createChatProfilePhotoUrl(
+            base, key, u.profile_photo_path
+          )
+        }))
+    );
 
     return res.json({ success: true, users });
   } catch (e) {
