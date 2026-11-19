@@ -4160,6 +4160,13 @@ app.post("/api/chat/calls/:id/history", async (req, res) => {
 
 /* END ARIF_CHAT_CALL_SIGNAL_API_V1 */
 
+require("./chat-stories")(app, {
+  marketConfig,
+  marketSession,
+  marketUser,
+  arifChatIsBlocked
+});
+
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, "0.0.0.0", () => {
