@@ -602,6 +602,178 @@ module.exports = function registerChatStories(app, deps) {
     }
   });
 
+
+  app.get("/api/chat/stories/:id/viewers", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    const session = auth(req, res);
+    if (!session) return;
+
+    try {
+      const storyId = Number(req.params.id);
+      if (!Number.isSafeInteger(storyId) || storyId <= 0) {
+        return res.status(400).json({
+          success: false,
+          message: "شناسه استوری معتبر نیست"
+        });
+      }
+
+      const me = await currentUser(session);
+      if (!me) {
+        return res.status(404).json({
+          success: false,
+          message: "حساب کاربری پیدا نشد"
+        });
+      }
+
+      const { base, key } = marketConfig();
+
+      const storyQuery = new URLSearchParams({
+        select: "id,owner_id,expires_at",
+        id: "eq." + storyId,
+        owner_id: "eq." + Number(me.id),
+        expires_at: "gt." + new Date().toISOString(),
+        limit: "1"
+      });
+
+      const storyResponse = await fetch(
+        base + "/rest/v1/arif_chat_stories?" + storyQuery,
+        { headers: { apikey: key, Authorization: "Bearer " + key } }
+      );
+
+      if (!storyResponse.ok) {
+        throw new Error("story_owner_lookup_failed");
+      }
+
+      const storyRows = await storyResponse.json();
+      if (!Array.isArray(storyRows) || !storyRows.length) {
+        return res.status(404).json({
+          success: false,
+          message: "استوری پیدا نشد یا متعلق به شما نیست"
+        });
+      }
+
+      const viewsQuery = new URLSearchParams({
+        select: "viewer_id,viewed_at",
+        story_id: "eq." + storyId,
+        order: "viewed_at.desc"
+      });
+
+      const viewsResponse = await fetch(
+        base + "/rest/v1/arif_chat_story_views?" + viewsQuery,
+        { headers: { apikey: key, Authorization: "Bearer " + key } }
+      );
+
+      if (!viewsResponse.ok) {
+        throw new Error("story_viewers_lookup_failed");
+      }
+
+      const views = await viewsResponse.json();
+      const validViews = Array.isArray(views) ? views : [];
+      const viewerIds = [...new Set(
+        validViews.map(v => Number(v.viewer_id))
+          .filter(id => Number.isSafeInteger(id) && id > 0)
+      )];
+
+      if (!viewerIds.length) {
+        return res.json({
+          success: true,
+          story_id: storyId,
+          view_count: 0,
+          viewers: []
+        });
+      }
+
+      const usersQuery = new URLSearchParams({
+        select: "id,first_name,surname,username,profile_photo_path",
+        id: "in.(" + viewerIds.join(",") + ")"
+      });
+
+      const usersResponse = await fetch(
+        base + "/rest/v1/app_users?" + usersQuery,
+        { headers: { apikey: key, Authorization: "Bearer " + key } }
+      );
+
+      if (!usersResponse.ok) {
+        throw new Error("story_viewer_profiles_lookup_failed");
+      }
+
+      const users = await usersResponse.json();
+      const userMap = new Map(
+        (Array.isArray(users) ? users : []).map(u => [Number(u.id), u])
+      );
+
+      const viewers = await Promise.all(validViews.map(async view => {
+        const user = userMap.get(Number(view.viewer_id));
+        if (!user) return null;
+
+        let photo = "";
+        if (user.profile_photo_path) {
+          const encoded = String(user.profile_photo_path)
+            .split("/").map(encodeURIComponent).join("/");
+
+          const photoResponse = await fetch(
+            base + "/storage/v1/object/sign/marketplace-media/" + encoded,
+            {
+              method: "POST",
+              headers: {
+                apikey: key,
+                Authorization: "Bearer " + key,
+                "Content-Type": "application/json"
+              },
+              body: JSON.stringify({ expiresIn: 3600 })
+            }
+          );
+
+          if (photoResponse.ok) {
+            const signedData = await photoResponse.json();
+            const signed = String(
+              signedData.signedURL || signedData.signedUrl || ""
+            );
+
+            if (/^https?:\/\//i.test(signed)) {
+              photo = signed;
+            } else if (signed) {
+              photo = base + (
+                signed.startsWith("/storage/v1/")
+                  ? signed
+                  : "/storage/v1" + (
+                      signed.startsWith("/") ? signed : "/" + signed
+                    )
+              );
+            }
+          }
+        }
+
+        return {
+          id: user.id,
+          name: [user.first_name, user.surname].filter(Boolean).join(" ")
+            || user.username || "کاربر",
+          username: user.username || "",
+          profile_photo_url: photo,
+          viewed_at: view.viewed_at
+        };
+      }));
+
+      const result = viewers.filter(Boolean);
+
+      return res.json({
+        success: true,
+        story_id: storyId,
+        view_count: validViews.length,
+        viewers: result
+      });
+    } catch (e) {
+      console.error(
+        "ARIF_STORY_VIEWERS_ERROR:",
+        String(e.message || e).slice(0, 150)
+      );
+      return res.status(503).json({
+        success: false,
+        message: "دریافت بازدیدکنندگان استوری ناموفق بود"
+      });
+    }
+  });
+
   app.delete("/api/chat/stories/:id", async (req, res) => {
     res.set("Cache-Control", "no-store");
     const session = auth(req, res);
