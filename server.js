@@ -1825,7 +1825,7 @@ app.get("/api/chat/conversations", async (req, res) => {
     const rows = await r.json();
     const conversations = Array.isArray(rows) ? rows : [];
     if (!conversations.length) {
-      return res.json({ success: true, conversations: [] });
+      return res.json({ success: true, current_user_id: myId, conversations: [] });
     }
 
     const ids = [...new Set(conversations.map(c => String(
@@ -1873,6 +1873,7 @@ app.get("/api/chat/conversations", async (req, res) => {
 
     return res.json({
       success: true,
+      current_user_id: myId,
       conversations: conversations.map(c => {
         const otherId = String(
           Number(c.user_one_id) === myId ? c.user_two_id : c.user_one_id
