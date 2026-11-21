@@ -15,7 +15,7 @@ app.use((req, res, next) => {
   next();
 });
 const adminAuth = require("./admin-auth");
-app.use(express.json({ limit: "35mb" }));
+app.use(express.json({ limit: "45mb" }));
 
 const fs = require("fs");
 const ORDERS_FILE = "./orders.json";
@@ -1157,11 +1157,11 @@ app.post("/api/marketplace/ads", async (req, res) => {
       ))) {
     return res.status(400).json({ success: false, message: "موقعیت مکانی معتبر نیست" });
   }
-  if (photos.length > 3) {
-    return res.status(400).json({ success: false, message: "حداکثر ۳ عکس انتخاب کنید" });
+  if (photos.length > 4) {
+    return res.status(400).json({ success: false, message: "حداکثر ۴ عکس انتخاب کنید" });
   }
   const totalEncoded = photos.reduce((sum, item) => sum + String(item || "").length, 0) + video.length;
-  if (totalEncoded > 33000000) {
+  if (totalEncoded > 43000000) {
     return res.status(413).json({ success: false, message: "حجم مجموع عکس‌ها و ویدیو زیاد است؛ فایل‌های کوچک‌تری انتخاب کنید" });
   }
 
